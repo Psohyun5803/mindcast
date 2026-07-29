@@ -63,30 +63,26 @@ emotion_classifier/
 ```bash
 cd personalrepo/run
 
-# EC_LABEL_MAP 필수 — assets/kote_id2label.json 경로 지정
-export EC_LABEL_MAP=/path/to/kote_id2label.json
+export EC_STAGEB_INPUT=/path/to/stageb_gold.xlsx   # Stage B gold 데이터 (필수)
 
-./emotion_classifier_run.sh -g 0 all
-# teacher → train-a → prep-b → train-b → export 순서로 실행
+./emotion_classifier_run.sh all online
+# teacher → train-a → train-b → export 순서로 실행
 ```
 
 ### 단계별 실행
 
 ```bash
 # 1. 교사 확률 생성 (KOTE → parquet)
-./emotion_classifier_run.sh -g 0 teacher
+./emotion_classifier_run.sh teacher
 
 # 2. Stage A 학습 (지식 증류)
-./emotion_classifier_run.sh -g 0 train-a
+./emotion_classifier_run.sh train-a
 
-# 3. Stage B 타겟 준비
-export EC_LABEL_MAP=/path/to/kote_id2label.json
-./emotion_classifier_run.sh prep-b
+# 3. Stage B 학습 (풍자 어댑터)
+export EC_STAGEB_INPUT=/path/to/stageb_gold.xlsx
+./emotion_classifier_run.sh train-b
 
-# 4. Stage B 학습 (풍자 어댑터)
-./emotion_classifier_run.sh -g 0 train-b
-
-# 5. 오프라인 번들 내보내기
+# 4. 오프라인 번들 내보내기
 ./emotion_classifier_run.sh export
 ```
 
@@ -102,16 +98,17 @@ export EC_LABEL_MAP=/path/to/kote_id2label.json
 
 경로 환경변수 (미지정 시 기본값 사용):
 
-| 변수 | 기본값 |
-|---|---|
-| `EC_DATA_DIR` | `data/emotion_classifier` |
-| `EC_MODEL_DIR` | `models/emotion_classifier` |
-| `EC_LABEL_MAP` | (없음, 필수) |
-| `EC_TEACHER_OUT` | `$EC_DATA_DIR/teacher_targets.parquet` |
-| `EC_STAGEA_DIR` | `$EC_MODEL_DIR/stage_a` |
-| `EC_STAGEB_TARGETS` | `$EC_DATA_DIR/stageb_targets.parquet` |
-| `EC_STAGEB_DIR` | `$EC_MODEL_DIR/stage_b` |
-| `EC_BUNDLE_OUT` | `$EC_MODEL_DIR/offline_bundle.pt` |
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `EC_STAGEB_INPUT` | (없음) | Stage B gold 데이터 경로 (`sarcasm_label` 포함, train-b 필수) |
+| `EC_DATA_DIR` | `data/emotion_classifier` | |
+| `EC_MODEL_DIR` | `models/emotion_classifier` | |
+| `EC_LABEL_MAP` | 패키지 기본 KOTE 44라벨 | 미지정 시 패키지 내장값 사용 |
+| `EC_TEACHER_OUT` | `$EC_DATA_DIR/teacher_targets.parquet` | |
+| `EC_STAGEA_DIR` | `$EC_MODEL_DIR/stage_a` | |
+| `EC_STAGEB_TARGETS` | `$EC_DATA_DIR/stageb_targets.parquet` | |
+| `EC_STAGEB_DIR` | `$EC_MODEL_DIR/stage_b` | |
+| `EC_BUNDLE_OUT` | `$EC_MODEL_DIR/offline_bundle.pt` | |
 
 ---
 
@@ -137,9 +134,9 @@ HuggingFace 댓글 데이터 → KOTE 교사 모델로 soft-label 생성
 | `stage_a/student_comment_distill.meta.json` | json | 학습 메타 (모델명·행 수·prob 컬럼 목록·seed) |
 | `stage_a/train_history.csv` | csv | epoch별 train_loss / val_loss / top1_match / prob_mae |
 
-### Pipeline 2 — Stage B 타겟 준비 (`prep-b`)
+### Pipeline 2 — Stage B 타겟 준비 (`prep-b`, 보조)
 
-정규화 데이터 + label map → Stage B 학습용 타겟 컬럼 생성
+기본 학습 흐름에서는 사용하지 않는 보조 스크립트 (`13_prepare_stage_b_targets.py`에 해당).
 
 | 산출물 | 형식 | 설명 |
 |---|---|---|
@@ -254,7 +251,8 @@ Stage A + Stage B checkpoint → 단일 오프라인 추론 번들
 ## 유의사항
 
 - Stage B 학습은 반드시 Stage A checkpoint 기반으로 합니다 (`--stagea-checkpoint` 필수).
-- `EC_LABEL_MAP`을 지정하지 않으면 `prep-b`, `train-b` 단계에서 오류가 납니다. 기본 KOTE 44라벨은 `assets/kote_id2label.json`을 사용하세요.
+- `EC_STAGEB_INPUT`은 `sarcasm_label`이 포함된 gold 데이터 경로로, `train-b` 실행 전 반드시 설정해야 합니다.
+- `EC_LABEL_MAP`은 미지정 시 패키지 내장 KOTE 44라벨을 사용합니다.
 - bundle에는 Stage B adapter 포함 여부에 따라 두 종류가 있습니다: `stagea_only` (base만), `stagea_stageb` (보정 포함).
 - CUDA가 없으면 CPU fallback으로 실행되며, 실제 데이터에서는 속도가 느려집니다.
 - Stage A checkpoint 자동 선택 시 여러 실험 결과가 섞여 있으면 의도치 않은 파일을 선택할 수 있으므로 재현 실험 시에는 경로를 명시하세요.

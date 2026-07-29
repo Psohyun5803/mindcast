@@ -17,10 +17,8 @@
 #   ./emotion_classifier_run.sh train-b                 # Stage B 학습 (EC_STAGEB_INPUT 필수)
 #   ./emotion_classifier_run.sh export                  # 번들 내보내기
 #
-#   [보조] prep-b: sarcasm_label 포함 gold 데이터가 없을 때,
-#          Stage A base 예측값을 proxy 타겟으로 변환해 Stage B 입력을 만드는 단계.
-#          gold 데이터가 있으면 prep-b 없이 train-b 에 직접 넘기면 된다.
-#   ./emotion_classifier_run.sh prep-b                  # Stage B proxy 타겟 준비 (gold 없을 때만)
+#   [보조] prep-b: 기본 흐름에서는 사용하지 않는 보조 스크립트.
+#   ./emotion_classifier_run.sh prep-b
 #
 # ── 개별 단계 (offline) ───────────────────────────────────────
 #   ./emotion_classifier_run.sh predict in.json out.csv      # 감정 추론
@@ -69,9 +67,7 @@ usage() {
     echo "  train-a      Stage A 학습 (지식 증류) → \$EC_STAGEA_DIR"
     echo "  train-b      Stage B 학습 (\$EC_STAGEB_INPUT 또는 --hf-source) → \$EC_STAGEB_DIR"
     echo "  export       오프라인 번들 내보내기 → \$EC_BUNDLE_OUT"
-    echo "  prep-b       [보조] Stage B proxy 타겟 준비"
-    echo "               gold 데이터(sarcasm_label)가 없을 때만 사용."
-    echo "               gold 데이터가 있으면 train-b 에 직접 넘길 것."
+    echo "  prep-b       [보조] 기본 흐름에서는 사용하지 않는 보조 스크립트"
     echo ""
     echo "── 개별 단계 (offline: 추론) ──────────────────────────"
     echo "  predict  <in> <out>       감정 추론 (json/csv/parquet → csv)"
