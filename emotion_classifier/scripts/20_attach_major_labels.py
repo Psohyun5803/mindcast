@@ -1,43 +1,28 @@
 #!/usr/bin/env python3
+"""후처리: 소분류 레이블 컬럼 → 대분류 컬럼 추가"""
 from __future__ import annotations
-
-import argparse
-import json
-import sys
+import argparse, json, sys
 from pathlib import Path
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
+SRC  = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from emotion_classifier_utils import map_cell
 from sarcasm_emotion_adapter.labels import get_default_major_mapping_path, load_small_to_major
-
-
-def map_cell(value: object, small_to_major: dict[str, str], sep: str) -> str:
-    if pd.isna(value):
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    if sep in text:
-        parts = [part.strip() for part in text.split(sep)]
-        return sep.join([small_to_major.get(part, "") for part in parts])
-    return small_to_major.get(text, "")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--mapping", default=str(get_default_major_mapping_path()))
-    parser.add_argument(
-        "--columns",
-        nargs="*",
-        default=["base_pred_label", "corrected_pred_label", "target_emotion_label", "final_emotion_target"],
-    )
+    parser.add_argument("--input",    required=True)
+    parser.add_argument("--output",   required=True)
+    parser.add_argument("--mapping",  default=str(get_default_major_mapping_path()))
+    parser.add_argument("--columns",  nargs="*",
+                        default=["base_pred_label", "corrected_pred_label",
+                                 "target_emotion_label", "final_emotion_target"])
     parser.add_argument("--list-sep", default=" | ")
     args = parser.parse_args()
 
@@ -67,7 +52,8 @@ def main() -> None:
     else:
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
-    print(json.dumps({"rows": int(len(df)), "added_columns": added, "output": str(output_path)}, ensure_ascii=False, indent=2))
+    print(json.dumps({"rows": int(len(df)), "added_columns": added, "output": str(output_path)},
+                     ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
