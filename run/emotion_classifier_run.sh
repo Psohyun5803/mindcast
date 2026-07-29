@@ -115,7 +115,7 @@ fi
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
 hf_token_args() {
-    [[ -n "${HF_TOKEN:-}" ]] && echo "--token $HF_TOKEN" || echo ""
+    [[ -n "${HF_TOKEN:-}" ]] && echo "--hf-token $HF_TOKEN" || echo ""
 }
 
 run_py() {

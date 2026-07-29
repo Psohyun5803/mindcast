@@ -80,7 +80,7 @@ def run_teacher(args):
     rng = random.Random(args.seed)
     target_files = list_target_files(
         args.years, args.include_2025_variant, args.include_2026_variant,
-        args.revision, args.token,
+        args.revision, args.hf_token,
     )
     if args.max_files:
         target_files = target_files[:args.max_files]
@@ -89,7 +89,7 @@ def run_teacher(args):
 
     rows, file_stats = [], []
     for idx, repo_path in enumerate(target_files, start=1):
-        file_rows = flatten_file(repo_path, args.revision, args.token)
+        file_rows = flatten_file(repo_path, args.revision, args.hf_token)
         raw_count = len(file_rows)
         if args.max_comments_per_file and raw_count > args.max_comments_per_file:
             file_rows = rng.sample(file_rows, args.max_comments_per_file)
@@ -427,7 +427,7 @@ def main():
     p.add_argument("--include-2025-variant",  choices=["ver1", "ver2_with_region", "all"], default="ver1")
     p.add_argument("--include-2026-variant",  choices=["ver1", "ver2_with_region", "all"], default="ver1")
     p.add_argument("--revision",              default="main")
-    p.add_argument("--token",                 default=None)
+    p.add_argument("--hf-token",              default=None)
     p.add_argument("--max-files",             type=int, default=None)
     p.add_argument("--max-comments-per-file", type=int, default=300)
     p.add_argument("--max-rows",              type=int, default=None)
