@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+outputs/pt/
+outputs/**/*.pt
+outputs/**/*.bin
+outputs/**/*.meta.json
+
+results/
+checkpoints/
