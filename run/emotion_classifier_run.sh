@@ -14,7 +14,7 @@
 # ── 개별 단계 (online) ────────────────────────────────────────
 #   ./emotion_classifier_run.sh teacher                 # KOTE 교사 확률 생성
 #   ./emotion_classifier_run.sh train-a                 # Stage A 학습
-#   ./emotion_classifier_run.sh train-b                 # Stage B 학습 (EC_STAGEB_INPUT 필수)
+#   ./emotion_classifier_run.sh train-b [gold.xlsx]     # Stage B 학습 (인자 또는 EC_STAGEB_INPUT)
 #   ./emotion_classifier_run.sh export                  # 번들 내보내기
 #
 #   [보조] prep-b: 기본 흐름에서는 사용하지 않는 보조 스크립트.
@@ -65,7 +65,7 @@ usage() {
     echo "── 개별 단계 (online: 학습) ───────────────────────────"
     echo "  teacher      KOTE 교사 확률 생성 → \$EC_TEACHER_OUT"
     echo "  train-a      Stage A 학습 (지식 증류) → \$EC_STAGEA_DIR"
-    echo "  train-b      Stage B 학습 (\$EC_STAGEB_INPUT 또는 --hf-source) → \$EC_STAGEB_DIR"
+    echo "  train-b [path]  Stage B 학습 (인자 또는 \$EC_STAGEB_INPUT) → \$EC_STAGEB_DIR"
     echo "  export       오프라인 번들 내보내기 → \$EC_BUNDLE_OUT"
     echo "  prep-b       [보조] 기본 흐름에서는 사용하지 않는 보조 스크립트"
     echo ""
@@ -174,16 +174,19 @@ do_prep_b() {
 }
 
 do_train_b() {
-    if [[ -z "$STAGEB_INPUT" && -z "${EC_HF_SOURCE:-}" ]]; then
+    # 인자로 직접 받거나 환경변수 EC_STAGEB_INPUT 사용
+    local stageb_in="${1:-$STAGEB_INPUT}"
+    if [[ -z "$stageb_in" && -z "${EC_HF_SOURCE:-}" ]]; then
         die "Stage B 입력 데이터가 필요합니다.\n" \
-            "  로컬 파일:  export EC_STAGEB_INPUT=/path/to/stageb_gold.xlsx\n" \
+            "  인자:       ./emotion_classifier_run.sh train-b /path/to/stageb_gold.xlsx\n" \
+            "  환경변수:   export EC_STAGEB_INPUT=/path/to/stageb_gold.xlsx\n" \
             "  HF 소스:    export EC_HF_SOURCE=<repo/path>"
     fi
     log "=== [online 3/4] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
     local input_args=()
-    [[ -n "$STAGEB_INPUT" ]]        && input_args+=(--input "$STAGEB_INPUT")
-    [[ -n "${EC_HF_SOURCE:-}" ]]    && input_args+=(--hf-source "$EC_HF_SOURCE")
+    [[ -n "$stageb_in" ]]        && input_args+=(--input "$stageb_in")
+    [[ -n "${EC_HF_SOURCE:-}" ]] && input_args+=(--hf-source "$EC_HF_SOURCE")
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "train-b" train-b \
@@ -280,7 +283,7 @@ case "$CMD" in
     teacher)      do_teacher ;;
     train-a)      do_train_a ;;
     prep-b)       do_prep_b ;;
-    train-b)      do_train_b ;;
+    train-b)      do_train_b "${1:-}" ;;
     export)       do_export ;;
     # ── 개별 단계 (offline) ────────────────────────────────
     predict)      do_predict      "${1:-}" "${2:-}" ;;
