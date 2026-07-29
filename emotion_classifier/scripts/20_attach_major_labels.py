@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC  = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT     = Path(__file__).resolve().parents[1]
+REPO_SRC = ROOT.parent / "src"
+EC_SRC = ROOT / "src"
+for _p in (REPO_SRC, EC_SRC):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from emotion_classifier_utils import map_cell
 from sarcasm_emotion_adapter.labels import get_default_major_mapping_path, load_small_to_major

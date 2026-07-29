@@ -8,10 +8,12 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC  = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT     = Path(__file__).resolve().parents[1]
+REPO_SRC = ROOT.parent / "src"
+EC_SRC = ROOT / "src"
+for _p in (REPO_SRC, EC_SRC):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from emotion_classifier_utils import list_target_files, flatten_file, batched_sigmoid_probs
 import random

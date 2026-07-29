@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse, json, sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC  = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT     = Path(__file__).resolve().parents[1]
+REPO_SRC = ROOT.parent / "src"
+EC_SRC = ROOT / "src"
+for _p in (REPO_SRC, EC_SRC):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from emotion_classifier_utils import read_rows, write_output
 from sarcasm_emotion_adapter.labels import get_default_major_mapping_path

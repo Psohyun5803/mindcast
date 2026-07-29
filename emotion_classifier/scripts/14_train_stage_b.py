@@ -12,10 +12,12 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC  = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT     = Path(__file__).resolve().parents[1]
+REPO_SRC = ROOT.parent / "src"
+EC_SRC = ROOT / "src"
+for _p in (REPO_SRC, EC_SRC):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from emotion_classifier_utils import (
     StageBCollator, StageBDataset, apply_title_optional, compute_losses,
