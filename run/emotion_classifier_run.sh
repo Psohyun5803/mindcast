@@ -36,6 +36,7 @@ DATA_DIR="${EC_DATA_DIR:-$SCRIPT_DIR/../data/emotion_classifier}"
 MODEL_DIR="${EC_MODEL_DIR:-$SCRIPT_DIR/../models/emotion_classifier}"
 TEACHER_OUT="${EC_TEACHER_OUT:-$DATA_DIR/teacher_targets.parquet}"
 STAGEA_DIR="${EC_STAGEA_DIR:-$MODEL_DIR/stage_a}"
+STAGEB_INPUT="${EC_STAGEB_INPUT:-}"           # Stage B gold 데이터 (sarcasm_label 포함, 필수)
 STAGEB_TARGETS="${EC_STAGEB_TARGETS:-$DATA_DIR/stageb_targets.parquet}"
 STAGEB_DIR="${EC_STAGEB_DIR:-$MODEL_DIR/stage_b}"
 BUNDLE_OUT="${EC_BUNDLE_OUT:-$MODEL_DIR/offline_bundle.pt}"
@@ -73,6 +74,7 @@ usage() {
     echo "경로 환경변수 (미지정 시 기본값 사용):"
     echo "  EC_DATA_DIR       데이터 디렉토리       (기본: data/emotion_classifier)"
     echo "  EC_MODEL_DIR      모델 디렉토리         (기본: models/emotion_classifier)"
+    echo "  EC_STAGEB_INPUT   Stage B gold 데이터    (sarcasm_label 포함, prep-b/train-b 필수)"
     echo "  EC_LABEL_MAP      label_map.json 경로   (미지정 시 패키지 기본 KOTE 44라벨 사용)"
     echo "  EC_TEACHER_OUT    교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
     echo "  EC_STAGEA_DIR     Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
@@ -149,16 +151,15 @@ do_train_a() {
 }
 
 do_prep_b() {
+    [[ -z "$STAGEB_INPUT" ]] && die "EC_STAGEB_INPUT 환경변수를 설정하세요\n  (sarcasm_label 이 포함된 Stage B gold 데이터 경로, 예: data/stageb_gold.xlsx)"
     log "=== [online 3/5] Stage B 타겟 준비 ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
-    # shellcheck disable=SC2046
     run_py "prep-b" prep-b \
-        --input "$TEACHER_OUT" \
+        --input "$STAGEB_INPUT" \
         "${label_map_args[@]}" \
-        --output "$STAGEB_TARGETS" \
-        $(hf_token_args)
+        --output "$STAGEB_TARGETS"
     ok "=== prep-b 완료 → $STAGEB_TARGETS ==="
 }
 
