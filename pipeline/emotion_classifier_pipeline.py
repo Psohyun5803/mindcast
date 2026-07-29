@@ -9,7 +9,7 @@ python emotion_classifier_pipeline.py --run teacher --output data/teacher_target
 python emotion_classifier_pipeline.py --run train-a --input data/teacher_targets.parquet --output-dir models/stage_a
 
 # Stage B: 풍자/감정 타겟 준비
-python emotion_classifier_pipeline.py --run prep-b --input data/teacher_targets.parquet --label-map <path> --output data/stageb_targets.parquet
+python emotion_classifier_pipeline.py --run prep-b --input data/teacher_targets.parquet --output data/stageb_targets.parquet
 
 # Stage B: 풍자 감정 어댑터 학습
 python emotion_classifier_pipeline.py --run train-b --input data/stageb_targets.parquet --stagea-checkpoint models/stage_a/student_comment_distill.pt --output-dir models/stage_b
@@ -461,7 +461,7 @@ def main():
     p.add_argument("--hf-revision",                  default="main")
     p.add_argument("--hf-token",                     default=None)
     p.add_argument("--hf-max-files",                 type=int, default=None)
-    p.add_argument("--label-map",                    required=True)
+    p.add_argument("--label-map",                    default=str(get_default_label_map_path()))
     p.add_argument("--output",                       required=True)
     p.add_argument("--drop-positive-without-target", action="store_true")
     p.add_argument("--max-rows",                     type=int, default=None)
