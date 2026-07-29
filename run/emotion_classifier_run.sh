@@ -80,7 +80,8 @@ usage() {
     echo "경로 환경변수 (미지정 시 기본값 사용):"
     echo "  EC_DATA_DIR       데이터 디렉토리       (기본: data/emotion_classifier)"
     echo "  EC_MODEL_DIR      모델 디렉토리         (기본: models/emotion_classifier)"
-    echo "  EC_STAGEB_INPUT   Stage B gold 데이터    (sarcasm_label 포함, 미지정 시 --hf-source 사용)"
+    echo "  EC_STAGEB_INPUT   Stage B 로컬 데이터    (sarcasm_label 포함 파일, EC_HF_SOURCE와 택1)"
+    echo "  EC_HF_SOURCE      Stage B HF 소스       (EC_STAGEB_INPUT와 택1, train-b/prep-b)"
     echo "  EC_LABEL_MAP      label_map.json 경로   (미지정 시 패키지 기본 KOTE 44라벨 사용)"
     echo "  EC_TEACHER_OUT    교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
     echo "  EC_STAGEA_DIR     Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
@@ -157,10 +158,16 @@ do_train_a() {
 }
 
 do_prep_b() {
+    if [[ -z "$STAGEB_INPUT" && -z "${EC_HF_SOURCE:-}" ]]; then
+        die "Stage B 입력 데이터가 필요합니다.\n" \
+            "  로컬 파일:  export EC_STAGEB_INPUT=/path/to/data.xlsx\n" \
+            "  HF 소스:    export EC_HF_SOURCE=<repo/path>"
+    fi
     log "=== [prep-b] Stage B 타겟 준비 (보조, 기본 흐름 외) ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
     local input_args=()
-    [[ -n "$STAGEB_INPUT" ]] && input_args=(--input "$STAGEB_INPUT")
+    [[ -n "$STAGEB_INPUT" ]]     && input_args+=(--input "$STAGEB_INPUT")
+    [[ -n "${EC_HF_SOURCE:-}" ]] && input_args+=(--hf-source "$EC_HF_SOURCE")
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "prep-b" prep-b \
@@ -171,10 +178,16 @@ do_prep_b() {
 }
 
 do_train_b() {
+    if [[ -z "$STAGEB_INPUT" && -z "${EC_HF_SOURCE:-}" ]]; then
+        die "Stage B 입력 데이터가 필요합니다.\n" \
+            "  로컬 파일:  export EC_STAGEB_INPUT=/path/to/stageb_gold.xlsx\n" \
+            "  HF 소스:    export EC_HF_SOURCE=<repo/path>"
+    fi
     log "=== [online 3/4] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
     local input_args=()
-    [[ -n "$STAGEB_INPUT" ]] && input_args=(--input "$STAGEB_INPUT")
+    [[ -n "$STAGEB_INPUT" ]]        && input_args+=(--input "$STAGEB_INPUT")
+    [[ -n "${EC_HF_SOURCE:-}" ]]    && input_args+=(--hf-source "$EC_HF_SOURCE")
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "train-b" train-b \
