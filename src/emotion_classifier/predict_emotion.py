@@ -10,9 +10,9 @@ import pandas as pd
 import torch
 from transformers import AutoTokenizer
 
-ROOT     = Path(__file__).resolve().parents[1]
-REPO_SRC = ROOT.parent / "src"
-EC_SRC   = ROOT / "src"
+ROOT     = Path(__file__).resolve().parents[2]
+REPO_SRC = ROOT / "src"
+EC_SRC   = ROOT / "emotion_classifier" / "src"
 for _p in (REPO_SRC, EC_SRC):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
