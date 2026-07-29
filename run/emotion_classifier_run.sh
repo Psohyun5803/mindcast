@@ -73,7 +73,7 @@ usage() {
     echo "경로 환경변수 (미지정 시 기본값 사용):"
     echo "  EC_DATA_DIR       데이터 디렉토리       (기본: data/emotion_classifier)"
     echo "  EC_MODEL_DIR      모델 디렉토리         (기본: models/emotion_classifier)"
-    echo "  EC_LABEL_MAP      label_map.json 경로   (online 필수)"
+    echo "  EC_LABEL_MAP      label_map.json 경로   (미지정 시 패키지 기본 KOTE 44라벨 사용)"
     echo "  EC_TEACHER_OUT    교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
     echo "  EC_STAGEA_DIR     Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
     echo "  EC_STAGEB_TARGETS Stage B 타겟 parquet   (기본: \$EC_DATA_DIR/stageb_targets.parquet)"
@@ -82,7 +82,6 @@ usage() {
     echo "  HF_TOKEN          HuggingFace 접근 토큰"
     echo ""
     echo "Examples:"
-    echo "  export EC_LABEL_MAP=/path/to/kote_id2label.json"
     echo "  ./emotion_classifier_run.sh all online"
     echo "  ./emotion_classifier_run.sh all offline data/comments.json data/results.csv"
     echo "  ./emotion_classifier_run.sh teacher"
@@ -150,28 +149,28 @@ do_train_a() {
 }
 
 do_prep_b() {
-    local label_map="${EC_LABEL_MAP:-}"
-    [[ -z "$label_map" ]] && die "EC_LABEL_MAP 환경변수를 설정하세요 (label_map.json 경로)"
     log "=== [online 3/5] Stage B 타겟 준비 ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
+    local label_map_args=()
+    [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     # shellcheck disable=SC2046
     run_py "prep-b" prep-b \
         --input "$TEACHER_OUT" \
-        --label-map "$label_map" \
+        "${label_map_args[@]}" \
         --output "$STAGEB_TARGETS" \
         $(hf_token_args)
     ok "=== prep-b 완료 → $STAGEB_TARGETS ==="
 }
 
 do_train_b() {
-    local label_map="${EC_LABEL_MAP:-}"
-    [[ -z "$label_map" ]] && die "EC_LABEL_MAP 환경변수를 설정하세요 (label_map.json 경로)"
     log "=== [online 4/5] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
+    local label_map_args=()
+    [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "train-b" train-b \
         --input "$STAGEB_TARGETS" \
         --stagea-checkpoint "$STAGEA_DIR/student_comment_distill.pt" \
-        --label-map "$label_map" \
+        "${label_map_args[@]}" \
         --output-dir "$STAGEB_DIR"
     ok "=== train-b 완료 → $STAGEB_DIR/stageB_adapter_checkpoint.pt ==="
 }
