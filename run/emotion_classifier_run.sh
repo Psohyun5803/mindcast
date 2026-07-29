@@ -67,7 +67,7 @@ usage() {
     echo "── 개별 단계 (online: 학습) ───────────────────────────"
     echo "  teacher      KOTE 교사 확률 생성 → \$EC_TEACHER_OUT"
     echo "  train-a      Stage A 학습 (지식 증류) → \$EC_STAGEA_DIR"
-    echo "  train-b      Stage B 학습 (\$EC_STAGEB_INPUT 필수) → \$EC_STAGEB_DIR"
+    echo "  train-b      Stage B 학습 (\$EC_STAGEB_INPUT 또는 --hf-source) → \$EC_STAGEB_DIR"
     echo "  export       오프라인 번들 내보내기 → \$EC_BUNDLE_OUT"
     echo "  prep-b       [보조] Stage B proxy 타겟 준비"
     echo "               gold 데이터(sarcasm_label)가 없을 때만 사용."
@@ -80,7 +80,7 @@ usage() {
     echo "경로 환경변수 (미지정 시 기본값 사용):"
     echo "  EC_DATA_DIR       데이터 디렉토리       (기본: data/emotion_classifier)"
     echo "  EC_MODEL_DIR      모델 디렉토리         (기본: models/emotion_classifier)"
-    echo "  EC_STAGEB_INPUT   Stage B gold 데이터    (sarcasm_label 포함, prep-b/train-b 필수)"
+    echo "  EC_STAGEB_INPUT   Stage B gold 데이터    (sarcasm_label 포함, 미지정 시 --hf-source 사용)"
     echo "  EC_LABEL_MAP      label_map.json 경로   (미지정 시 패키지 기본 KOTE 44라벨 사용)"
     echo "  EC_TEACHER_OUT    교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
     echo "  EC_STAGEA_DIR     Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
@@ -157,26 +157,28 @@ do_train_a() {
 }
 
 do_prep_b() {
-    [[ -z "$STAGEB_INPUT" ]] && die "EC_STAGEB_INPUT 환경변수를 설정하세요\n  (sarcasm_label 이 포함된 Stage B gold 데이터 경로, 예: data/stageb_gold.xlsx)"
     log "=== [prep-b] Stage B 타겟 준비 (보조, 기본 흐름 외) ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
+    local input_args=()
+    [[ -n "$STAGEB_INPUT" ]] && input_args=(--input "$STAGEB_INPUT")
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "prep-b" prep-b \
-        --input "$STAGEB_INPUT" \
+        "${input_args[@]}" \
         "${label_map_args[@]}" \
         --output "$STAGEB_TARGETS"
     ok "=== prep-b 완료 → $STAGEB_TARGETS ==="
 }
 
 do_train_b() {
-    [[ -z "$STAGEB_INPUT" ]] && die "EC_STAGEB_INPUT 환경변수를 설정하세요\n  (sarcasm_label 이 포함된 Stage B gold 데이터 경로, 예: data/stageb_gold.xlsx)"
     log "=== [online 3/4] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
+    local input_args=()
+    [[ -n "$STAGEB_INPUT" ]] && input_args=(--input "$STAGEB_INPUT")
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "train-b" train-b \
-        --input "$STAGEB_INPUT" \
+        "${input_args[@]}" \
         --stagea-checkpoint "$STAGEA_DIR/student_comment_distill.pt" \
         "${label_map_args[@]}" \
         --output-dir "$STAGEB_DIR"
