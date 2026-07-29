@@ -7,7 +7,7 @@
 #   (GPU 지정: -g 0  /  미지정 시 PyTorch 자동 탐지)
 #
 # ── 모드별 전체 실행 ──────────────────────────────────────────
-#   ./emotion_classifier_run.sh all online              # 학습 전체 (teacher→train-a→prep-b→train-b→export)
+#   ./emotion_classifier_run.sh all online              # 학습 전체 (teacher→train-a→train-b→export)
 #   ./emotion_classifier_run.sh all offline in.json out.csv  # 추론 전체 (predict→attach-major)
 #   ./emotion_classifier_run.sh all                     # online과 동일 (기본값)
 #
@@ -132,7 +132,7 @@ run_py() {
 # ════════════════════════════════════════════════════════════
 
 do_teacher() {
-    log "=== [online 1/5] KOTE 교사 확률 생성 ==="
+    log "=== [online 1/4] KOTE 교사 확률 생성 ==="
     mkdir -p "$(dirname "$TEACHER_OUT")"
     # shellcheck disable=SC2046
     run_py "teacher" teacher \
@@ -142,7 +142,7 @@ do_teacher() {
 }
 
 do_train_a() {
-    log "=== [online 2/5] Stage A 학습 (지식 증류) ==="
+    log "=== [online 2/4] Stage A 학습 (지식 증류) ==="
     mkdir -p "$STAGEA_DIR"
     run_py "train-a" train-a \
         --input "$TEACHER_OUT" \
@@ -152,7 +152,7 @@ do_train_a() {
 
 do_prep_b() {
     [[ -z "$STAGEB_INPUT" ]] && die "EC_STAGEB_INPUT 환경변수를 설정하세요\n  (sarcasm_label 이 포함된 Stage B gold 데이터 경로, 예: data/stageb_gold.xlsx)"
-    log "=== [online 3/5] Stage B 타겟 준비 ==="
+    log "=== [prep-b] Stage B 타겟 준비 (보조, 기본 흐름 외) ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
@@ -164,12 +164,13 @@ do_prep_b() {
 }
 
 do_train_b() {
-    log "=== [online 4/5] Stage B 학습 (풍자 감정 어댑터) ==="
+    [[ -z "$STAGEB_INPUT" ]] && die "EC_STAGEB_INPUT 환경변수를 설정하세요\n  (sarcasm_label 이 포함된 Stage B gold 데이터 경로, 예: data/stageb_gold.xlsx)"
+    log "=== [online 3/4] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
     local label_map_args=()
     [[ -n "${EC_LABEL_MAP:-}" ]] && label_map_args=(--label-map "$EC_LABEL_MAP")
     run_py "train-b" train-b \
-        --input "$STAGEB_TARGETS" \
+        --input "$STAGEB_INPUT" \
         --stagea-checkpoint "$STAGEA_DIR/student_comment_distill.pt" \
         "${label_map_args[@]}" \
         --output-dir "$STAGEB_DIR"
@@ -177,7 +178,7 @@ do_train_b() {
 }
 
 do_export() {
-    log "=== [online 5/5] 오프라인 번들 내보내기 ==="
+    log "=== [online 4/4] 오프라인 번들 내보내기 ==="
     mkdir -p "$(dirname "$BUNDLE_OUT")"
     run_py "export" export \
         --base-checkpoint "$STAGEA_DIR/student_comment_distill.pt" \
@@ -222,10 +223,9 @@ do_attach_major() {
 
 do_all_online() {
     info "모드: online (학습 파이프라인)"
-    log "=== 학습 파이프라인 시작: teacher → train-a → prep-b → train-b → export ==="
+    log "=== 학습 파이프라인 시작: teacher → train-a → train-b → export ==="
     do_teacher
     do_train_a
-    do_prep_b
     do_train_b
     do_export
     ok "=== 학습 파이프라인 완료 → $BUNDLE_OUT ==="
