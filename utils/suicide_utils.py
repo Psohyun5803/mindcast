@@ -273,12 +273,14 @@ def build_frame(emotion_mode="group"):
         sel_idx = [labels.index(e) for e in SELECTED_EMO if e in labels]
 
     inter_cols = []
+    new_cols = {}
     for j, ei in enumerate(sel_idx):
         base_col = ecols[ei] if emotion_mode == "group" else f"emo_mean_{ei}"
         for k in range(K):
             col = f"inter_{j}_{k}"
-            frame[col] = frame[base_col].values * frame[f"topic_ratio_{k}"].values
+            new_cols[col] = frame[base_col].values * frame[f"topic_ratio_{k}"].values
             inter_cols.append(col)
+    frame = pd.concat([frame, pd.DataFrame(new_cols, index=frame.index)], axis=1)
 
     return frame, labels if emotion_mode != "group" else GROUP_ORDER, ecols, tcols, inter_cols, K
 
@@ -852,7 +854,7 @@ def monthly_emotion():
                          columns=["date"] + [f"emotion_{i}" for i in range(44)])
     df["month"] = pd.PeriodIndex(pd.to_datetime(df["date"]), freq="M")
     labels  = json.load(open(EMO / "emotion_labels.json"))
-    mapping = json.load(open(DATA / "mapping_ver1.json"))
+    mapping = EMO_GROUPS
     groups  = ["기쁨", "슬픔", "분노", "중립"]
     msum    = df.groupby("month")[[f"emotion_{i}" for i in range(44)]].sum()
     feats   = {}

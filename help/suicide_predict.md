@@ -91,13 +91,30 @@ python suicide_pipeline.py --run monthly
 
 ### Pipeline 0 — 전처리
 
-| 단계 | 역할 | 출력 |
-|------|------|------|
-| build_target | HuggingFace → 상담건수 parquet | `cache/raw/target_call_counts_2018_2023.parquet` |
-| build_comments | HuggingFace → 댓글 parquet | `cache/raw/youtube_news_comments.parquet` |
-| kote_inference | ELECTRA 44감정 추론 (GPU) | `cache/emotion/comment_kote_probs.parquet` |
-| daily_emotion | 댓글별 → 날짜별 집계 | `cache/emotion/daily_kote_features.parquet` |
-| topic_features | TF-IDF + KMeans 토픽 | `cache/topic/daily_topic_features.parquet` |
+| 단계 | 함수 | 입력 | 출력 |
+|------|------|------|------|
+| 1/4 target 준비 | `build_target()` | HuggingFace `MindCastSogang/SuicideDataset` | `cache/raw/target_call_counts_2018_2023.parquet` |
+| 2/4 댓글 다운로드 | `build_comments()` | HuggingFace `Youtube_news_preprocessed_data` | `cache/raw/youtube_news_comments.parquet` |
+| 3/4 KOTE 추론 | `kote_inference()` | `youtube_news_comments.parquet` (GPU 필요) | `cache/emotion/comment_kote_probs.parquet`<br>`cache/emotion/emotion_labels.json` |
+| 4/4 감정 집계 | `daily_emotion()` | `comment_kote_probs.parquet` | `cache/emotion/daily_kote_features.parquet` |
+| 4/4 토픽 클러스터링 | `topic_features()` | `youtube_news_comments.parquet` | `cache/topic/daily_topic_features.parquet` |
+
+**cache 디렉터리 전체 구조:**
+```
+data/suicide_predict/
+└── cache/
+    ├── raw/
+    │   ├── target_call_counts_2018_2023.parquet   ← 일별 상담건수
+    │   └── youtube_news_comments.parquet           ← 댓글 원본 (date, title, comment_id, ...)
+    ├── emotion/
+    │   ├── comment_kote_probs.parquet              ← 댓글별 44감정 확률 (emotion_0~43)
+    │   ├── emotion_labels.json                     ← KOTE 44감정 레이블 목록
+    │   └── daily_kote_features.parquet             ← 날짜별 감정 집계 피처
+    └── topic/
+        └── daily_topic_features.parquet            ← 날짜별 토픽 비율 피처 (topic_ratio_0~9)
+```
+
+---
 
 ### Pipeline 1 — 일별 Ablation
 
@@ -105,13 +122,31 @@ python suicide_pipeline.py --run monthly
 ```
 A: 상담 이력만                    ← 최종 채택
 B: A + 캘린더 피처
-C: B + 댓글 볼륨
+C: B + 댓글 볼륨 (댓글량)
 D: C + KOTE 감정 (4 대분류)
 E: D + 뉴스 토픽
-F: E + 감정×토픽 교호작용
+F: E + 감정×토픽 상호작용
+
+ablation 후 MASE가 가장 낮은 모델 채택
 ```
 
-출력: `outputs/metrics/results_summary.csv`, `outputs/metrics/results_test.md`
+**산출물:**
+```
+outputs/
+├── metrics/
+│   ├── results_per_seed.csv          ← 실험×시드×split 전체 raw 결과
+│   ├── results_summary.csv           ← 실험별 4-seed 평균/std 요약
+│   └── results_test.md               ← 테스트셋 성능 마크다운 테이블
+├── predictions/
+│   └── {ExperimentName}_test.parquet ← 각 실험 seed=42 테스트 예측값
+└── checkpoints/
+    ├── exodlinear_D_best.pt          ← Setting D (NB head) 체크포인트
+    └── exodlinear_point_best.pt      ← Setting D (point head) 체크포인트
+```
+
+> `--mode point`로 실행 시 파일명에 `point_` 접두사 붙음 (예: `results_point_summary.csv`)
+
+---
 
 ### Pipeline 2 — 메인 모델 확정
 
@@ -119,7 +154,21 @@ F: E + 감정×토픽 교호작용
 ```python
 MAIN_CFG = dict(model="exodlinear", head="point", lookback=56, hidden=64, dropout=0.5)
 ```
-출력: `outputs/checkpoints/main_model.pt`, `deliverable/00_MAIN_prediction.png`
+
+**산출물:**
+```
+outputs/
+├── predictions/
+│   └── MAIN_test.parquet             ← 메인 모델 seed=42 테스트 예측값
+└── checkpoints/
+    └── main_model.pt                 ← 최종 모델 가중치 (state_dict + cfg + meta)
+
+deliverable/
+├── 00_MAIN_prediction.png            ← valid(2022)+test(2023) 예측 시각화
+└── MAIN_MODEL.md                     ← 모델 카드 (성능 테이블 포함)
+```
+
+---
 
 ### Pipeline 3 — 월별 예측기
 
@@ -129,7 +178,13 @@ MAIN_CFG = dict(model="exodlinear", head="point", lookback=56, hidden=64, dropou
 복합:  S+E, S+T, E+T, S+E+T
 기준선: 계절평균, lag-12
 ```
-출력: `deliverable/monthly_suicide_7models.csv`, `deliverable/14_monthly_suicide_7models.png`
+
+**산출물:**
+```
+deliverable/
+├── monthly_suicide_7models.csv       ← 7조합 + 기준선 성능 테이블 (R², MAE 등)
+└── 14_monthly_suicide_7models.png    ← R²/MAE 막대그래프 비교
+```
 
 ---
 
@@ -190,7 +245,7 @@ T 포함 조합: 전반적으로 성능 저하
    │
    ├── [일별] dataset → train → ablation → main_model
    │
-   └── [월별] load_socio + monthly_emotion + monthly_topic → RidgeCV
+   └── [월별] load_socio (월별 사회경제변수) + monthly_emotion + monthly_topic → RidgeCV
 ```
 
 ---

@@ -120,8 +120,16 @@ export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz   # local 소스 시
 | kiwi | 제목에서 NNP/NNG 명사 추출 (≥ 2글자) |
 | ko-sroberta | 제목+태그 임베딩 (N×768 float32, L2 정규화) |
 
-입력: `video_video` 테이블 (source=hf 또는 local)  
-출력: `data/posts_<month>.parquet`, `data/emb_<month>.npy`
+입력: `video_video` 테이블 (source=hf 또는 local)
+
+**산출물:**
+```
+data/
+├── posts_<month>.parquet    ← 정제된 뉴스 포스트 (title, clean_title, keyphrases, tags, comment_count 등)
+└── emb_<month>.npy          ← ko-sroberta 임베딩 (N×768 float32, L2 정규화)
+```
+
+---
 
 ### Pipeline 1 — track (온라인 트래킹)
 
@@ -136,8 +144,18 @@ export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz   # local 소스 시
    신규 → provisional → confirmed (2일 지속 or 3000 댓글)
 ```
 
-입력: `data/posts_<month>.parquet`, `data/emb_<month>.npy`  
-출력: `outputs/tracks_online[_<month>].pkl`, `outputs/events_online[_<month>].csv`
+입력: `data/posts_<month>.parquet`, `data/emb_<month>.npy`
+
+**산출물:**
+```
+outputs/
+├── tracks_online[_<month>].pkl    ← OnlineTracker 전체 상태 (이벤트 목록·EMA centroid·라이프사이클)
+└── events_online[_<month>].csv   ← 이벤트 요약 표 (id, label, status, birth, n_posts, n_comments, ...)
+```
+
+> 2025-09 기준 월의 파일은 접미사 없음 (`tracks_online.pkl`), 이후 월은 `tracks_online_<month>.pkl`
+
+---
 
 ### Pipeline 2 — viz (시각화)
 
@@ -145,7 +163,17 @@ export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz   # local 소스 시
 - 누적 확정 이벤트 수 꺾은선
 - 오프라인 pkl이 있으면 온/오프라인 비교 텍스트 추가
 
-출력: `figures/06_online_dynamics[_<month>].png`
+입력: `outputs/tracks_online[_<month>].pkl`
+
+**산출물:**
+```
+figures/
+└── 06_online_dynamics[_<month>].png    ← birth/revival 타임라인 + 누적 이벤트 수
+```
+
+> 2025-09는 `06_online_dynamics.png`, 이후 월은 `06_online_dynamics_<month>.png`
+
+---
 
 ### Pipeline 3 — export (HTML 리플레이)
 
@@ -154,8 +182,14 @@ export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz   # local 소스 시
 - 일별 상태 재현 (new/active/decaying/dormant/revived)
 - 실제 뉴스 제목·댓글량 임베딩 (자립형 HTML, 외부 의존 없음)
 
-입력: 모든 `MONTHS`의 pkl + posts + emb  
-출력: `online_replay.html`
+입력: 모든 `MONTHS`의 `tracks_online[_<month>].pkl` + `posts_<month>.parquet` + `emb_<month>.npy`
+
+**산출물:**
+```
+online_replay.html    ← 전월 통합 일별 리플레이 (자립형, CDN 의존 없음)
+```
+
+---
 
 ### Pipeline 4 — upload (HF 업로드)
 
@@ -166,10 +200,35 @@ export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz   # local 소스 시
 3. 가드 통과 후 private HF 데이터셋에 업로드
 ```
 
+입력: `$MINDCAST_DUMP` (로컬 sql.gz)
+
+**산출물:**
+```
+hf_staging/                          ← PII 가드 전 임시 저장 (업로드 후 삭제 가능)
+├── video_video.parquet
+├── video_channel.parquet
+└── video_comment.parquet            ← author는 SHA-256(16 hex) 가명화
+
+HuggingFace: $MINDCAST_HF_REPO      ← private dataset (위 3개 파일)
+  (기본: MindCastSogang/mindcast-news-events)
+```
+
+---
+
 ### Pipeline 5 — extract (로컬 캐시)
 
 로컬 덤프를 자주 쓸 때 속도 향상용 parquet 캐시 생성.  
 파이프라인 자체는 이 캐시 없이도 동작합니다.
+
+입력: `$MINDCAST_DUMP`
+
+**산출물:**
+```
+data/
+├── video_video.parquet      ← 항상 생성
+├── video_channel.parquet    ← 항상 생성
+└── video_comment.parquet    ← --with-comments 옵션 시에만
+```
 
 ---
 
