@@ -37,6 +37,9 @@ holidays
 # ── 한국어 NLP (mindcast_online prep) ────────────────────────────
 kiwipiepy
 
+# ── Excel I/O (emotion_classifier) ───────────────────────────────
+openpyxl
+
 # ── 기타 ──────────────────────────────────────────────────────────
 tqdm
 joblib
