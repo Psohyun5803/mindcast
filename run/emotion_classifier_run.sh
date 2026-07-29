@@ -4,22 +4,23 @@
 #
 # Usage:
 #   ./emotion_classifier_run.sh [-g <GPU>] <command> [옵션]
+#   (GPU 지정: -g 0  /  미지정 시 PyTorch 자동 탐지)
 #
 # ── 모드별 전체 실행 ──────────────────────────────────────────
-#   ./emotion_classifier_run.sh -g 0 all online              # 학습 전체 (teacher→train-a→prep-b→train-b→export)
-#   ./emotion_classifier_run.sh    all offline in.json out.csv  # 추론 전체 (predict→attach-major)
-#   ./emotion_classifier_run.sh -g 0 all                     # online과 동일 (기본값)
+#   ./emotion_classifier_run.sh all online              # 학습 전체 (teacher→train-a→prep-b→train-b→export)
+#   ./emotion_classifier_run.sh all offline in.json out.csv  # 추론 전체 (predict→attach-major)
+#   ./emotion_classifier_run.sh all                     # online과 동일 (기본값)
 #
 # ── 개별 단계 (online) ────────────────────────────────────────
-#   ./emotion_classifier_run.sh -g 0 teacher                 # KOTE 교사 확률 생성
-#   ./emotion_classifier_run.sh -g 0 train-a                 # Stage A 학습
-#   ./emotion_classifier_run.sh    prep-b                    # Stage B 타겟 준비
-#   ./emotion_classifier_run.sh -g 0 train-b                 # Stage B 학습
-#   ./emotion_classifier_run.sh    export                    # 번들 내보내기
+#   ./emotion_classifier_run.sh teacher                 # KOTE 교사 확률 생성
+#   ./emotion_classifier_run.sh train-a                 # Stage A 학습
+#   ./emotion_classifier_run.sh prep-b                  # Stage B 타겟 준비
+#   ./emotion_classifier_run.sh train-b                 # Stage B 학습
+#   ./emotion_classifier_run.sh export                  # 번들 내보내기
 #
 # ── 개별 단계 (offline) ───────────────────────────────────────
-#   ./emotion_classifier_run.sh    predict in.json out.csv   # 감정 추론
-#   ./emotion_classifier_run.sh    attach-major in.csv out.csv  # 대분류 컬럼 추가
+#   ./emotion_classifier_run.sh predict in.json out.csv      # 감정 추론
+#   ./emotion_classifier_run.sh attach-major in.csv out.csv  # 대분류 컬럼 추가
 # ============================================================
 
 set -euo pipefail
@@ -82,9 +83,9 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  export EC_LABEL_MAP=/path/to/kote_id2label.json"
-    echo "  ./emotion_classifier_run.sh -g 0 all online"
+    echo "  ./emotion_classifier_run.sh all online"
     echo "  ./emotion_classifier_run.sh all offline data/comments.json data/results.csv"
-    echo "  ./emotion_classifier_run.sh -g 0 teacher"
+    echo "  ./emotion_classifier_run.sh teacher"
     echo "  ./emotion_classifier_run.sh predict data/comments.json data/results.csv"
     echo "  ./emotion_classifier_run.sh attach-major data/results.csv data/results_major.csv"
 }
