@@ -5,14 +5,21 @@
 # Usage:
 #   ./emotion_classifier_run.sh [-g <GPU>] <command> [옵션]
 #
-#   ./emotion_classifier_run.sh -g 0 teacher                 # Stage A 교사 확률 생성
-#   ./emotion_classifier_run.sh -g 0 train-a                 # Stage A 학습 (지식 증류)
+# ── 모드별 전체 실행 ──────────────────────────────────────────
+#   ./emotion_classifier_run.sh -g 0 all online              # 학습 전체 (teacher→train-a→prep-b→train-b→export)
+#   ./emotion_classifier_run.sh    all offline in.json out.csv  # 추론 전체 (predict→attach-major)
+#   ./emotion_classifier_run.sh -g 0 all                     # online과 동일 (기본값)
+#
+# ── 개별 단계 (online) ────────────────────────────────────────
+#   ./emotion_classifier_run.sh -g 0 teacher                 # KOTE 교사 확률 생성
+#   ./emotion_classifier_run.sh -g 0 train-a                 # Stage A 학습
 #   ./emotion_classifier_run.sh    prep-b                    # Stage B 타겟 준비
-#   ./emotion_classifier_run.sh -g 0 train-b                 # Stage B 학습 (풍자 어댑터)
-#   ./emotion_classifier_run.sh    export                    # 오프라인 번들 내보내기
-#   ./emotion_classifier_run.sh    predict input.json out.csv # 오프라인 추론
-#   ./emotion_classifier_run.sh    attach-major in.csv out.csv # 대분류 컬럼 추가
-#   ./emotion_classifier_run.sh -g 0 all                     # teacher → train-a → prep-b → train-b → export
+#   ./emotion_classifier_run.sh -g 0 train-b                 # Stage B 학습
+#   ./emotion_classifier_run.sh    export                    # 번들 내보내기
+#
+# ── 개별 단계 (offline) ───────────────────────────────────────
+#   ./emotion_classifier_run.sh    predict in.json out.csv   # 감정 추론
+#   ./emotion_classifier_run.sh    attach-major in.csv out.csv  # 대분류 컬럼 추가
 # ============================================================
 
 set -euo pipefail
@@ -33,9 +40,10 @@ STAGEB_DIR="${EC_STAGEB_DIR:-$MODEL_DIR/stage_b}"
 BUNDLE_OUT="${EC_BUNDLE_OUT:-$MODEL_DIR/offline_bundle.pt}"
 
 # ── 색상 출력 ─────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
 log()  { echo -e "${CYAN}[$(date '+%H:%M:%S')] $*${NC}"; }
 ok()   { echo -e "${GREEN}[$(date '+%H:%M:%S')] ✓ $*${NC}"; }
+info() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] ℹ $*${NC}"; }
 die()  { echo -e "${RED}[ERROR] $*${NC}" >&2; exit 1; }
 
 # ── 사용법 ───────────────────────────────────────────────────
@@ -43,38 +51,42 @@ usage() {
     echo "Usage: ./emotion_classifier_run.sh [-g <GPU>] <command> [옵션]"
     echo ""
     echo "Options:"
-    echo "  -g <N>    GPU 번호 (teacher/train-a/train-b/all 에서 사용, 예: -g 0)"
+    echo "  -g <N>    GPU 번호 (teacher/train-a/train-b 에서 사용, 예: -g 0)"
     echo "  -h        도움말"
     echo ""
-    echo "Commands:"
-    echo "  teacher               KOTE 교사 확률 생성 → \$EC_TEACHER_OUT"
-    echo "  train-a               Stage A 학습 (지식 증류) → \$EC_STAGEA_DIR"
-    echo "  prep-b                Stage B 타겟 준비 → \$EC_STAGEB_TARGETS"
-    echo "  train-b               Stage B 학습 (풍자 감정 어댑터) → \$EC_STAGEB_DIR"
-    echo "  export                오프라인 번들 내보내기 → \$EC_BUNDLE_OUT"
-    echo "  predict  <in> <out>   오프라인 추론 (입력: json/csv/parquet, 출력: csv)"
-    echo "  attach-major <in> <out>  소분류 → 대분류 컬럼 추가"
-    echo "  all                   teacher → train-a → prep-b → train-b → export"
+    echo "── 전체 실행 ──────────────────────────────────────────"
+    echo "  all [online]              학습 파이프라인: teacher → train-a → prep-b → train-b → export"
+    echo "  all offline <in> <out>    추론 파이프라인: predict → attach-major"
+    echo ""
+    echo "── 개별 단계 (online: 학습) ───────────────────────────"
+    echo "  teacher      KOTE 교사 확률 생성 → \$EC_TEACHER_OUT"
+    echo "  train-a      Stage A 학습 (지식 증류) → \$EC_STAGEA_DIR"
+    echo "  prep-b       Stage B 타겟 준비 → \$EC_STAGEB_TARGETS"
+    echo "  train-b      Stage B 학습 (풍자 감정 어댑터) → \$EC_STAGEB_DIR"
+    echo "  export       오프라인 번들 내보내기 → \$EC_BUNDLE_OUT"
+    echo ""
+    echo "── 개별 단계 (offline: 추론) ──────────────────────────"
+    echo "  predict  <in> <out>       감정 추론 (json/csv/parquet → csv)"
+    echo "  attach-major <in> <out>   소분류 → 대분류 컬럼 추가"
     echo ""
     echo "경로 환경변수 (미지정 시 기본값 사용):"
-    echo "  EC_DATA_DIR          데이터 디렉토리       (기본: data/emotion_classifier)"
-    echo "  EC_MODEL_DIR         모델 디렉토리         (기본: models/emotion_classifier)"
-    echo "  EC_TEACHER_OUT       교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
-    echo "  EC_STAGEA_DIR        Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
-    echo "  EC_STAGEB_TARGETS    Stage B 타겟 parquet   (기본: \$EC_DATA_DIR/stageb_targets.parquet)"
-    echo "  EC_STAGEB_DIR        Stage B 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_b)"
-    echo "  EC_BUNDLE_OUT        번들 출력 경로         (기본: \$EC_MODEL_DIR/offline_bundle.pt)"
-    echo "  HF_TOKEN             HuggingFace 접근 토큰"
+    echo "  EC_DATA_DIR       데이터 디렉토리       (기본: data/emotion_classifier)"
+    echo "  EC_MODEL_DIR      모델 디렉토리         (기본: models/emotion_classifier)"
+    echo "  EC_LABEL_MAP      label_map.json 경로   (online 필수)"
+    echo "  EC_TEACHER_OUT    교사 확률 parquet      (기본: \$EC_DATA_DIR/teacher_targets.parquet)"
+    echo "  EC_STAGEA_DIR     Stage A 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_a)"
+    echo "  EC_STAGEB_TARGETS Stage B 타겟 parquet   (기본: \$EC_DATA_DIR/stageb_targets.parquet)"
+    echo "  EC_STAGEB_DIR     Stage B 출력 디렉토리  (기본: \$EC_MODEL_DIR/stage_b)"
+    echo "  EC_BUNDLE_OUT     번들 출력 경로         (기본: \$EC_MODEL_DIR/offline_bundle.pt)"
+    echo "  HF_TOKEN          HuggingFace 접근 토큰"
     echo ""
     echo "Examples:"
+    echo "  export EC_LABEL_MAP=/path/to/kote_id2label.json"
+    echo "  ./emotion_classifier_run.sh -g 0 all online"
+    echo "  ./emotion_classifier_run.sh all offline data/comments.json data/results.csv"
     echo "  ./emotion_classifier_run.sh -g 0 teacher"
-    echo "  ./emotion_classifier_run.sh -g 0 train-a"
-    echo "  ./emotion_classifier_run.sh    prep-b"
-    echo "  ./emotion_classifier_run.sh -g 0 train-b"
-    echo "  ./emotion_classifier_run.sh    export"
-    echo "  ./emotion_classifier_run.sh    predict data/comments.json data/results.csv"
-    echo "  ./emotion_classifier_run.sh    attach-major data/results.csv data/results_major.csv"
-    echo "  ./emotion_classifier_run.sh -g 0 all"
+    echo "  ./emotion_classifier_run.sh predict data/comments.json data/results.csv"
+    echo "  ./emotion_classifier_run.sh attach-major data/results.csv data/results_major.csv"
 }
 
 # ── 인자 파싱 ────────────────────────────────────────────────
@@ -113,10 +125,12 @@ run_py() {
     ok "$desc 완료"
 }
 
-# ── pipeline 함수 ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# Online (학습) 단계
+# ════════════════════════════════════════════════════════════
 
 do_teacher() {
-    log "=== [teacher] KOTE 교사 확률 생성 ==="
+    log "=== [online 1/5] KOTE 교사 확률 생성 ==="
     mkdir -p "$(dirname "$TEACHER_OUT")"
     # shellcheck disable=SC2046
     run_py "teacher" teacher \
@@ -126,7 +140,7 @@ do_teacher() {
 }
 
 do_train_a() {
-    log "=== [train-a] Stage A 학습 (지식 증류) ==="
+    log "=== [online 2/5] Stage A 학습 (지식 증류) ==="
     mkdir -p "$STAGEA_DIR"
     run_py "train-a" train-a \
         --input "$TEACHER_OUT" \
@@ -137,7 +151,7 @@ do_train_a() {
 do_prep_b() {
     local label_map="${EC_LABEL_MAP:-}"
     [[ -z "$label_map" ]] && die "EC_LABEL_MAP 환경변수를 설정하세요 (label_map.json 경로)"
-    log "=== [prep-b] Stage B 타겟 준비 ==="
+    log "=== [online 3/5] Stage B 타겟 준비 ==="
     mkdir -p "$(dirname "$STAGEB_TARGETS")"
     # shellcheck disable=SC2046
     run_py "prep-b" prep-b \
@@ -151,7 +165,7 @@ do_prep_b() {
 do_train_b() {
     local label_map="${EC_LABEL_MAP:-}"
     [[ -z "$label_map" ]] && die "EC_LABEL_MAP 환경변수를 설정하세요 (label_map.json 경로)"
-    log "=== [train-b] Stage B 학습 (풍자 감정 어댑터) ==="
+    log "=== [online 4/5] Stage B 학습 (풍자 감정 어댑터) ==="
     mkdir -p "$STAGEB_DIR"
     run_py "train-b" train-b \
         --input "$STAGEB_TARGETS" \
@@ -162,7 +176,7 @@ do_train_b() {
 }
 
 do_export() {
-    log "=== [export] 오프라인 번들 내보내기 ==="
+    log "=== [online 5/5] 오프라인 번들 내보내기 ==="
     mkdir -p "$(dirname "$BUNDLE_OUT")"
     run_py "export" export \
         --base-checkpoint "$STAGEA_DIR/student_comment_distill.pt" \
@@ -171,15 +185,20 @@ do_export() {
     ok "=== export 완료 → $BUNDLE_OUT ==="
 }
 
+# ════════════════════════════════════════════════════════════
+# Offline (추론) 단계
+# ════════════════════════════════════════════════════════════
+
 do_predict() {
     local input="${1:-}"
     local output="${2:-}"
     [[ -z "$input"  ]] && die "입력 파일 경로를 지정하세요  (예: data/comments.json)"
     [[ -z "$output" ]] && die "출력 파일 경로를 지정하세요  (예: data/results.csv)"
-    log "=== [predict] 오프라인 추론  $input → $output ==="
+    [[ ! -f "$BUNDLE_OUT" ]] && die "번들 파일이 없습니다: $BUNDLE_OUT\n먼저 'all online' 또는 'export'를 실행하세요."
+    log "=== [offline 1/2] 감정 추론  $input → $output ==="
     run_py "predict" predict \
         --bundle "$BUNDLE_OUT" \
-        --input "$input" \
+        --input  "$input" \
         --output "$output"
     ok "=== predict 완료 → $output ==="
 }
@@ -189,21 +208,37 @@ do_attach_major() {
     local output="${2:-}"
     [[ -z "$input"  ]] && die "입력 파일 경로를 지정하세요  (예: data/results.csv)"
     [[ -z "$output" ]] && die "출력 파일 경로를 지정하세요  (예: data/results_major.csv)"
-    log "=== [attach-major] 대분류 컬럼 추가  $input → $output ==="
+    log "=== [offline 2/2] 대분류 컬럼 추가  $input → $output ==="
     run_py "attach-major" attach-major \
         --input  "$input" \
         --output "$output"
     ok "=== attach-major 완료 → $output ==="
 }
 
-do_all() {
-    log "=== 전체 학습 파이프라인 시작 (teacher → train-a → prep-b → train-b → export) ==="
+# ════════════════════════════════════════════════════════════
+# all: 모드 선택
+# ════════════════════════════════════════════════════════════
+
+do_all_online() {
+    info "모드: online (학습 파이프라인)"
+    log "=== 학습 파이프라인 시작: teacher → train-a → prep-b → train-b → export ==="
     do_teacher
     do_train_a
     do_prep_b
     do_train_b
     do_export
-    ok "=== 전체 학습 파이프라인 완료 → $BUNDLE_OUT ==="
+    ok "=== 학습 파이프라인 완료 → $BUNDLE_OUT ==="
+}
+
+do_all_offline() {
+    local input="${1:-}"
+    local output="${2:-}"
+    info "모드: offline (추론 파이프라인)"
+    log "=== 추론 파이프라인 시작: predict → attach-major ==="
+    local major_out="${output%.csv}_major.csv"
+    do_predict      "$input" "$output"
+    do_attach_major "$output" "$major_out"
+    ok "=== 추론 파이프라인 완료 → $major_out ==="
 }
 
 # ── 진입점 ───────────────────────────────────────────────────
@@ -213,14 +248,26 @@ CMD="${1:-}"
 shift || true
 
 case "$CMD" in
+    # ── 전체 실행 ──────────────────────────────────────────
+    all)
+        MODE="${1:-online}"
+        shift || true
+        case "$MODE" in
+            online)  do_all_online ;;
+            offline) do_all_offline "${1:-}" "${2:-}" ;;
+            *) die "all 모드는 online 또는 offline이어야 합니다 (예: all online / all offline in.json out.csv)" ;;
+        esac
+        ;;
+    # ── 개별 단계 (online) ─────────────────────────────────
     teacher)      do_teacher ;;
     train-a)      do_train_a ;;
     prep-b)       do_prep_b ;;
     train-b)      do_train_b ;;
     export)       do_export ;;
+    # ── 개별 단계 (offline) ────────────────────────────────
     predict)      do_predict      "${1:-}" "${2:-}" ;;
     attach-major) do_attach_major "${1:-}" "${2:-}" ;;
-    all)          do_all ;;
+    # ── 기타 ──────────────────────────────────────────────
     ""|--help|-h) usage ;;
     *) die "알 수 없는 명령: '$CMD'\n\n$(usage)" ;;
 esac
