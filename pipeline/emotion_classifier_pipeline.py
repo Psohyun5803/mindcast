@@ -411,9 +411,12 @@ def run_predict(args):
         or getattr(args, "comment", None)
     )
     if not has_input:
-        from emotion_classifier_config import DEFAULT_HF_SOURCE
+        from emotion_classifier_config import DEFAULT_HF_SOURCE, DEFAULT_HF_MAX_FILES
         args.hf_source = DEFAULT_HF_SOURCE
+        if not getattr(args, "hf_max_files", None):
+            args.hf_max_files = DEFAULT_HF_MAX_FILES
         log(f"입력 소스가 지정되지 않아 기본 HuggingFace 소스를 사용합니다: {DEFAULT_HF_SOURCE}")
+        log(f"  (파일 수 제한: {DEFAULT_HF_MAX_FILES}개 | 전체 사용 시 --hf-max-files 0 또는 EC_HF_MAX_FILES=0)")
         log("입력 소스를 직접 지정하려면:")
         log("  --input <파일>              로컬 파일 (json / csv / parquet / xlsx)")
         log("  --hf-source <org/repo/...>  HuggingFace 소스")

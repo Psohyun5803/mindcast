@@ -34,3 +34,6 @@ DEFAULT_PREDICTION_DIR = OUTPUTS_DIR
 DEFAULT_HF_SOURCE = os.environ.get(
     "EC_HF_SOURCE", "MindCastSogang/Youtube_news_preprocessed_data"
 )
+
+# 입력 미지정 시 자동 HF 소스에 적용할 최대 파일 수 (전체 레포 방지)
+DEFAULT_HF_MAX_FILES = int(os.environ.get("EC_HF_MAX_FILES", "10"))
