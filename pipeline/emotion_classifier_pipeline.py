@@ -27,8 +27,7 @@ python emotion_classifier_pipeline.py --run attach-major --input data/prediction
 import sys as _sys
 from pathlib import Path as _Path
 _BASE    = _Path(__file__).resolve().parents[1]
-_EC_SRC  = _BASE / "emotion_classifier" / "src"
-for _p in (_BASE / "src", _EC_SRC):
+for _p in (_BASE / "src", _BASE / "src" / "emotion_classifier", _BASE / "config"):
     _sys.path.insert(0, str(_p))
 # ────────────────────────────────────────────────────────────────────────────
 import argparse, json, math, random, sys
@@ -43,6 +42,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from emotion_classifier_utils import (
+    META_FIELDS,
     DistillDataset, StageBCollator, StageBDataset,
     apply_title_optional, batched_sigmoid_probs, compute_losses,
     evaluate_stage_a, evaluate_stage_b, flatten_file, list_target_files,
@@ -58,7 +58,7 @@ from sarcasm_emotion_adapter.modeling import (
 )
 from sarcasm_emotion_adapter.offline import (
     OfflineSarcasmEmotionPredictor, export_offline_bundle,
-    read_bundle_metadata, resolve_bundle_checkpoint,
+    resolve_bundle_checkpoint,
 )
 
 # ── 로그 유틸 ────────────────────────────────────────────────────────────────
@@ -134,6 +134,17 @@ def run_teacher(args):
 
 def run_train_a(args):
     log("=== Stage A 학습 시작 ===")
+    if not args.input and not args.hf_source:
+        from emotion_classifier_config import DEFAULT_STAGEA_NORMALIZED
+        if not DEFAULT_STAGEA_NORMALIZED.exists():
+            die(f"정규화된 Stage A 데이터가 없습니다: {DEFAULT_STAGEA_NORMALIZED}\n"
+                f"먼저 'prep-a'를 실행하세요.")
+        args.input = str(DEFAULT_STAGEA_NORMALIZED)
+        log(f"Stage A 입력 자동 선택: {args.input}")
+    if args.output_dir is None:
+        from emotion_classifier_config import DEFAULT_STAGEA_DIR
+        args.output_dir = str(DEFAULT_STAGEA_DIR)
+        log(f"출력 경로 자동 설정: {args.output_dir}")
     seed_everything(args.seed)
     df = load_dataset_frame(input_path=args.input, hf_source=args.hf_source,
                             hf_revision=args.hf_revision, hf_token=args.hf_token,
@@ -189,50 +200,48 @@ def run_train_a(args):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# Pipeline 2 — Stage B 타겟 준비 (13_prepare_stage_b_targets)
+# Pipeline 1.5 — Stage A 데이터 정규화 (prep-a)
 # ════════════════════════════════════════════════════════════════════════
 
-def run_prep_b(args):
-    log("=== Stage B 타겟 준비 시작 ===")
+def run_prep_a(args):
+    log("=== Stage A 데이터 정규화 ===")
+    if not args.input and not args.hf_source:
+        die("--input 또는 --hf-source 중 하나는 필수입니다")
+    if args.output is None:
+        from emotion_classifier_config import DEFAULT_STAGEA_NORMALIZED
+        args.output = str(DEFAULT_STAGEA_NORMALIZED)
+        log(f"출력 경로 자동 설정: {args.output}")
     df = load_dataset_frame(input_path=args.input, hf_source=args.hf_source,
                             hf_revision=args.hf_revision, hf_token=args.hf_token,
                             hf_max_files=args.hf_max_files, max_rows=args.max_rows, seed=args.seed)
-    label_map = load_label_map(args.label_map)
-    label2id  = {label: idx for idx, label in label_map.items()}
+    pcols = teacher_prob_columns(df)
+    if not pcols:
+        die("teacher_prob_* 컬럼이 없습니다. Stage A teacher-target 데이터를 입력하세요.")
+    df = df.dropna(subset=["comment"] + pcols).reset_index(drop=True)
+    output_path = write_dataframe(df, args.output)
+    ok(f"Stage A 정규화 완료: {output_path}  rows={len(df)}  prob_cols={len(pcols)}")
 
-    if "sarcasm_label" not in df.columns and "sarcasm_annotation" not in df.columns:
-        die("Expected sarcasm_label or sarcasm_annotation in the input dataset")
-    if "base_emotion_label" not in df.columns:
-        die("Expected base_emotion_label in the input dataset")
 
-    work = df.copy()
-    if "sarcasm_label" not in work.columns:
-        work["sarcasm_label"] = 0
-    work["sarcasm_label"]       = work["sarcasm_label"].fillna(0).astype(int)
-    work["base_emotion_label"]  = work["base_emotion_label"].fillna("").astype(str).str.strip()
-    work["actual_emotion_label"]= work.get("actual_emotion_target", "").fillna("").astype(str).str.strip()
-    work["use_actual_emotion_target"] = (
-        (work["sarcasm_label"] == 1) & work["actual_emotion_label"].ne("")
-    ).astype(int)
+# ════════════════════════════════════════════════════════════════════════
+# Pipeline 2 — Stage B 데이터 정규화 (prep-b)
+# ════════════════════════════════════════════════════════════════════════
 
-    if args.drop_positive_without_target:
-        work = work[~((work["sarcasm_label"] == 1) & (work["use_actual_emotion_target"] == 0))].reset_index(drop=True)
-
-    actual_mask = work["use_actual_emotion_target"] == 1
-    work["final_emotion_target"] = work["base_emotion_label"]
-    work.loc[actual_mask, "final_emotion_target"] = work.loc[actual_mask, "actual_emotion_label"]
-    work["final_emotion_target_source"] = "comment_only_pred_proxy"
-    work.loc[actual_mask, "final_emotion_target_source"] = "positive_actual_emotion_target"
-
-    unknown = sorted(set(work["final_emotion_target"]) - set(label2id))
-    if unknown:
-        die(f"unknown labels: {unknown}")
-
-    work["base_emotion_id"]         = work["base_emotion_label"].map(label2id).astype(int)
-    work["final_emotion_target_id"] = work["final_emotion_target"].map(label2id).astype(int)
-
-    output_path = write_dataframe(work, args.output)
-    ok(f"Stage B 타겟 저장: {output_path}  rows={len(work)} sarcasm_positive={int(work['sarcasm_label'].sum())}")
+def run_prep_b(args):
+    log("=== Stage B 데이터 정규화 ===")
+    if not args.input and not args.hf_source:
+        die("--input 또는 --hf-source 중 하나는 필수입니다")
+    if args.output is None:
+        from emotion_classifier_config import DEFAULT_STAGEB_NORMALIZED
+        args.output = str(DEFAULT_STAGEB_NORMALIZED)
+        log(f"출력 경로 자동 설정: {args.output}")
+    df = load_dataset_frame(input_path=args.input, hf_source=args.hf_source,
+                            hf_revision=args.hf_revision, hf_token=args.hf_token,
+                            hf_max_files=args.hf_max_files, max_rows=args.max_rows, seed=args.seed)
+    missing = [c for c in ("comment", "sarcasm_label") if c not in df.columns]
+    if missing:
+        die(f"필수 컬럼 없음: {missing}. Stage B gold 데이터(sarcasm_label 포함)를 입력하세요.")
+    output_path = write_dataframe(df, args.output)
+    ok(f"Stage B 정규화 완료: {output_path}  rows={len(df)}  sarcasm_positive={int(df['sarcasm_label'].sum())}")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -241,6 +250,25 @@ def run_prep_b(args):
 
 def run_train_b(args):
     log("=== Stage B 학습 시작 ===")
+    if not args.input and not args.hf_source:
+        from emotion_classifier_config import DEFAULT_STAGEB_NORMALIZED
+        if not DEFAULT_STAGEB_NORMALIZED.exists():
+            die(f"정규화된 Stage B 데이터가 없습니다: {DEFAULT_STAGEB_NORMALIZED}\n"
+                f"먼저 'prep-b'를 실행하세요.")
+        args.input = str(DEFAULT_STAGEB_NORMALIZED)
+        log(f"Stage B 입력 자동 선택: {args.input}")
+    if args.stagea_checkpoint is None:
+        from emotion_classifier_config import DEFAULT_STAGEA_DIR
+        default_ckpt = DEFAULT_STAGEA_DIR / "student_comment_distill.pt"
+        if not default_ckpt.exists():
+            die(f"Stage A checkpoint를 찾을 수 없습니다: {default_ckpt}\n"
+                f"  먼저 'train-a'를 실행하거나 --stagea-checkpoint로 직접 지정하세요.")
+        args.stagea_checkpoint = str(default_ckpt)
+        log(f"Stage A checkpoint 자동 선택: {args.stagea_checkpoint}")
+    if args.output_dir is None:
+        from emotion_classifier_config import DEFAULT_STAGEB_DIR
+        args.output_dir = str(DEFAULT_STAGEB_DIR)
+        log(f"출력 경로 자동 설정: {args.output_dir}")
     seed_everything(args.seed)
     df = load_dataset_frame(input_path=args.input, hf_source=args.hf_source,
                             hf_revision=args.hf_revision, hf_token=args.hf_token,
@@ -361,18 +389,82 @@ def run_export(args):
 # Pipeline 5 — 오프라인 추론 (01_offline_infer)
 # ════════════════════════════════════════════════════════════════════════
 
+def _predict_default_output(args) -> str:
+    from emotion_classifier_config import DEFAULT_PREDICTION_DIR
+    if getattr(args, "hf_source", None):
+        source = Path(args.hf_source).name
+    elif getattr(args, "input", None):
+        source = Path(args.input).stem
+    else:
+        source = "local"
+    date_str = datetime.now().strftime("%Y%m%d")
+    DEFAULT_PREDICTION_DIR.mkdir(parents=True, exist_ok=True)
+    return str(DEFAULT_PREDICTION_DIR / f"prediction_{source}_{date_str}.json")
+
+
 def run_predict(args):
     log("=== 오프라인 추론 시작 ===")
-    rows, single_input = read_rows(args)
-    meta = read_bundle_metadata(args.bundle)
-    ckpt = resolve_bundle_checkpoint(args.bundle, meta)
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(meta["student_model"])
-    predictor = OfflineSarcasmEmotionPredictor(
-        ckpt, tokenizer, device=device,
-        major_mapping_path=args.major_mapping or str(get_default_major_mapping_path()),
+    has_input = (
+        getattr(args, "hf_source", None)
+        or getattr(args, "input", None)
+        or getattr(args, "input_json", None)
+        or getattr(args, "comment", None)
     )
-    df = predictor.predict_dataframe(rows)
+    if not has_input:
+        from emotion_classifier_config import DEFAULT_HF_SOURCE
+        args.hf_source = DEFAULT_HF_SOURCE
+        log(f"입력 소스가 지정되지 않아 기본 HuggingFace 소스를 사용합니다: {DEFAULT_HF_SOURCE}")
+        log("입력 소스를 직접 지정하려면:")
+        log("  --input <파일>              로컬 파일 (json / csv / parquet / xlsx)")
+        log("  --hf-source <org/repo/...>  HuggingFace 소스")
+        log("  --comment <텍스트>          단일 댓글 직접 입력")
+
+    if args.output is None:
+        args.output = _predict_default_output(args)
+        log(f"출력 경로 자동 설정: {args.output}")
+
+    # 입력 데이터 로드
+    if getattr(args, "hf_source", None):
+        df = load_dataset_frame(
+            hf_source=args.hf_source,
+            hf_revision=args.hf_revision,
+            hf_token=args.hf_token,
+            hf_max_files=args.hf_max_files,
+        )
+        if "comment" not in df.columns:
+            die("input data must contain a comment column")
+        if "title" not in df.columns:
+            df["title"] = df["news_title"].fillna("") if "news_title" in df.columns else ""
+        keep_cols = [col for col in (*META_FIELDS, "title", "comment") if col in df.columns]
+        rows = df[keep_cols].to_dict("records")
+        single_input = False
+    else:
+        rows, single_input = read_rows(args)
+
+    # 번들 경로 결정
+    from emotion_classifier_config import DEFAULT_BUNDLE_SEARCH_DIRS
+    bundle_dir     = getattr(args, "bundle_dir", None)
+    bundle_pattern = getattr(args, "bundle_pattern", None) or "offline_bundle*.pt"
+
+    if getattr(args, "bundle", None):
+        bundle_path = resolve_bundle_checkpoint(args.bundle)
+    elif bundle_dir:
+        bundle_path = resolve_bundle_checkpoint(bundle_dir=bundle_dir, pattern=bundle_pattern)
+    else:
+        bundle_path = None
+        for d in DEFAULT_BUNDLE_SEARCH_DIRS:
+            try:
+                bundle_path = resolve_bundle_checkpoint(bundle_dir=d, pattern=bundle_pattern)
+                log(f"번들 자동 탐색: {bundle_path}")
+                break
+            except FileNotFoundError:
+                continue
+        if bundle_path is None:
+            searched = ", ".join(str(d) for d in DEFAULT_BUNDLE_SEARCH_DIRS)
+            die(f"번들 파일을 찾을 수 없습니다. --bundle을 지정하거나 기본 경로에 번들을 두세요.\n  탐색 경로: {searched}")
+
+    predictor = OfflineSarcasmEmotionPredictor.from_bundle(bundle_path)
+    df = predictor.predict(rows)
     write_output(df, Path(args.output), single_input)
     ok(f"추론 결과 저장: {args.output}  rows={len(df)}")
 
@@ -443,7 +535,8 @@ def main():
     p.add_argument("--hf-revision",       default="main")
     p.add_argument("--hf-token",          default=None)
     p.add_argument("--hf-max-files",      type=int, default=None)
-    p.add_argument("--output-dir",        required=True)
+    p.add_argument("--output-dir",        default=None,
+                   help="출력 디렉토리 (미지정 시 config DEFAULT_STAGEA_DIR)")
     p.add_argument("--student-model",     default="beomi/KcELECTRA-base")
     p.add_argument("--batch-size",        type=int, default=16)
     p.add_argument("--epochs",            type=int, default=8)
@@ -454,41 +547,54 @@ def main():
     p.add_argument("--local-files-only",  action="store_true")
     p.add_argument("--max-rows",          type=int, default=None)
 
+    # ── prep-a ───────────────────────────────────────────────────────────
+    p = sub.add_parser("prep-a", help="Stage A 데이터 정규화 (중간 산출물 저장)")
+    p.add_argument("--input",        default=None)
+    p.add_argument("--hf-source",    default=None)
+    p.add_argument("--hf-revision",  default="main")
+    p.add_argument("--hf-token",     default=None)
+    p.add_argument("--hf-max-files", type=int, default=None)
+    p.add_argument("--output",       default=None,
+                   help="출력 parquet (미지정 시 config DEFAULT_STAGEA_NORMALIZED)")
+    p.add_argument("--max-rows",     type=int, default=None)
+    p.add_argument("--seed",         type=int, default=42)
+
     # ── prep-b ───────────────────────────────────────────────────────────
-    p = sub.add_parser("prep-b", help="Stage B 타겟 준비")
-    p.add_argument("--input",                        default=None)
-    p.add_argument("--hf-source",                    default=None)
-    p.add_argument("--hf-revision",                  default="main")
-    p.add_argument("--hf-token",                     default=None)
-    p.add_argument("--hf-max-files",                 type=int, default=None)
-    p.add_argument("--label-map",                    default=str(get_default_label_map_path()))
-    p.add_argument("--output",                       required=True)
-    p.add_argument("--drop-positive-without-target", action="store_true")
-    p.add_argument("--max-rows",                     type=int, default=None)
-    p.add_argument("--seed",                         type=int, default=42)
+    p = sub.add_parser("prep-b", help="Stage B 데이터 정규화 (중간 산출물 저장)")
+    p.add_argument("--input",        default=None)
+    p.add_argument("--hf-source",    default=None)
+    p.add_argument("--hf-revision",  default="main")
+    p.add_argument("--hf-token",     default=None)
+    p.add_argument("--hf-max-files", type=int, default=None)
+    p.add_argument("--output",       default=None,
+                   help="출력 parquet (미지정 시 config DEFAULT_STAGEB_NORMALIZED)")
+    p.add_argument("--max-rows",     type=int, default=None)
+    p.add_argument("--seed",         type=int, default=42)
 
     # ── train-b ──────────────────────────────────────────────────────────
     p = sub.add_parser("train-b", help="Stage B 학습: 풍자 감정 어댑터")
     p.add_argument("--input",                default=None)
     p.add_argument("--hf-source",            default=None)
-    p.add_argument("--hf-revision",         default="main")
-    p.add_argument("--hf-token",            default=None)
-    p.add_argument("--hf-max-files",        type=int, default=None)
-    p.add_argument("--stagea-checkpoint",   required=True)
-    p.add_argument("--label-map",           default=str(get_default_label_map_path()))
-    p.add_argument("--student-model",       default="beomi/KcELECTRA-base")
-    p.add_argument("--output-dir",          required=True)
-    p.add_argument("--batch-size",          type=int, default=16)
-    p.add_argument("--epochs",              type=int, default=5)
-    p.add_argument("--lr",                  type=float, default=2e-5)
-    p.add_argument("--max-length",          type=int, default=192)
-    p.add_argument("--seed",                type=int, default=42)
-    p.add_argument("--val-size",            type=float, default=0.2)
-    p.add_argument("--gate-loss-weight",    type=float, default=1.0)
-    p.add_argument("--emotion-loss-weight", type=float, default=1.0)
-    p.add_argument("--identity-loss-weight",type=float, default=0.5)
-    p.add_argument("--max-rows",            type=int, default=None)
-    p.add_argument("--local-files-only",    action="store_true")
+    p.add_argument("--hf-revision",          default="main")
+    p.add_argument("--hf-token",             default=None)
+    p.add_argument("--hf-max-files",         type=int, default=None)
+    p.add_argument("--stagea-checkpoint",    default=None,
+                   help="Stage A checkpoint (미지정 시 config DEFAULT_STAGEA_DIR에서 자동 선택)")
+    p.add_argument("--label-map",            default=str(get_default_label_map_path()))
+    p.add_argument("--student-model",        default="beomi/KcELECTRA-base")
+    p.add_argument("--output-dir",           default=None,
+                   help="출력 디렉토리 (미지정 시 config DEFAULT_STAGEB_DIR)")
+    p.add_argument("--batch-size",           type=int, default=16)
+    p.add_argument("--epochs",               type=int, default=5)
+    p.add_argument("--lr",                   type=float, default=2e-5)
+    p.add_argument("--max-length",           type=int, default=192)
+    p.add_argument("--seed",                 type=int, default=42)
+    p.add_argument("--val-size",             type=float, default=0.2)
+    p.add_argument("--gate-loss-weight",     type=float, default=1.0)
+    p.add_argument("--emotion-loss-weight",  type=float, default=1.0)
+    p.add_argument("--identity-loss-weight", type=float, default=0.5)
+    p.add_argument("--max-rows",             type=int, default=None)
+    p.add_argument("--local-files-only",     action="store_true")
 
     # ── export ───────────────────────────────────────────────────────────
     p = sub.add_parser("export", help="오프라인 번들 내보내기")
@@ -502,11 +608,21 @@ def main():
 
     # ── predict ──────────────────────────────────────────────────────────
     p = sub.add_parser("predict", help="오프라인 추론")
-    p.add_argument("--bundle",        required=True)
-    p.add_argument("--input",         default=None)
-    p.add_argument("--json-input",    default=None)
-    p.add_argument("--output",        required=True)
-    p.add_argument("--major-mapping", default=None)
+    p.add_argument("--bundle",          default=None,
+                   help="번들 파일 경로 (미지정 시 기본 경로 자동 탐색)")
+    p.add_argument("--bundle-dir",      default=None,
+                   help="번들 디렉토리 (미지정 시 config 기본 경로)")
+    p.add_argument("--bundle-pattern",  default=None,
+                   help="번들 파일 패턴 (기본: offline_bundle*.pt)")
+    p.add_argument("--input",           default=None)
+    p.add_argument("--hf-source",       default=None)
+    p.add_argument("--hf-revision",     default="main")
+    p.add_argument("--hf-token",        default=None)
+    p.add_argument("--hf-max-files",    type=int, default=None)
+    p.add_argument("--json-input",      default=None)
+    p.add_argument("--output",          default=None,
+                   help="출력 경로 (미지정 시 outputs/emotion_classifier/prediction_<source>_<date>.json)")
+    p.add_argument("--major-mapping",   default=None)
 
     # ── attach-major ─────────────────────────────────────────────────────
     p = sub.add_parser("attach-major", help="소분류 → 대분류 컬럼 추가")
@@ -522,6 +638,7 @@ def main():
 
     dispatch = {
         "teacher":      run_teacher,
+        "prep-a":       run_prep_a,
         "train-a":      run_train_a,
         "prep-b":       run_prep_b,
         "train-b":      run_train_b,

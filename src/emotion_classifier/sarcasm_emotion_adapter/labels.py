@@ -52,11 +52,11 @@ KOTE_LABELS = [
 
 
 def get_default_label_map_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "assets" / "kote_id2label.json"
+    return Path(__file__).resolve().parents[3] / "data" / "emotion_classifier" / "assets" / "kote_id2label.json"
 
 
 def get_default_major_mapping_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "assets" / "mapping_ver1.json"
+    return Path(__file__).resolve().parents[3] / "data" / "emotion_classifier" / "assets" / "mapping_ver1.json"
 
 
 def load_major_mapping(path: str | Path | None = None) -> dict[str, list[str]]:
