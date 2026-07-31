@@ -29,8 +29,17 @@
 
 set -euo pipefail
 
-# ── 설정 ─────────────────────────────────────────────────────
+# ── .env 자동 로드 ────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+# ── 설정 ─────────────────────────────────────────────────────
 PIPELINE="$SCRIPT_DIR/../pipeline/emotion_classifier_pipeline.py"
 PYTHON="${PYTHON:-python3}"
 GPU=""

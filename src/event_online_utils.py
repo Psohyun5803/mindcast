@@ -119,7 +119,8 @@ def _extract_local(table):
     cols = SCHEMA[table]
     head = f"INSERT INTO `{table}` VALUES"
     rows, collecting, buf = [], False, []
-    with gzip.open(DUMP, "rt", encoding="utf-8", errors="replace") as f:
+    _open = gzip.open if str(DUMP).endswith(".gz") else open
+    with _open(DUMP, "rt", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not collecting:
                 if line.startswith(head):
@@ -137,14 +138,26 @@ def _extract_local(table):
 
 
 def _extract_hf(table):
+    from huggingface_hub.errors import RepositoryNotFoundError
     uri = f"hf://datasets/{HF_REPO}/{table}.parquet"
     try:
         return pd.read_parquet(uri)
     except Exception:
+        pass
+    try:
         from huggingface_hub import hf_hub_download
         p = hf_hub_download(repo_id=HF_REPO, filename=f"{table}.parquet",
                             repo_type="dataset")
         return pd.read_parquet(p)
+    except RepositoryNotFoundError:
+        raise PermissionError(
+            f"HuggingFace 인증 실패 — private 데이터셋에 접근할 수 없습니다.\n"
+            f"  repo: {HF_REPO}\n\n"
+            f"  토큰을 설정하세요:\n"
+            f"    export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
+            f"  또는 로그인:\n"
+            f"    hf auth login"
+        )
 
 
 def _hash_author(s):
@@ -165,10 +178,18 @@ def _normalize(table, df, hash_author=True):
 
 def load_table(table, source="hf", hash_author=True):
     """Return a typed DataFrame for `table` from `source` ('hf'|'local').
-    Output schema/typing is identical across sources."""
+    Output schema/typing is identical across sources.
+    source='local' uses parquet cache (from extract) if available, otherwise parses dump."""
     if table not in SCHEMA:
         raise ValueError(f"table not in allow-list (news tables only): {table}")
-    df = _extract_local(table) if source == "local" else _extract_hf(table)
+    if source == "local":
+        cache = DATA / f"{table}.parquet"
+        if cache.exists():
+            print(f"[load_table] parquet 캐시 사용: {cache}")
+            return pd.read_parquet(cache)
+        df = _extract_local(table)
+    else:
+        df = _extract_hf(table)
     return _normalize(table, df, hash_author=hash_author)
 
 
@@ -222,7 +243,14 @@ def prep_month(month, source="hf", device=None):
 
     kiwi = Kiwi()
     v = load_table("video_video", source=source)
+    available = sorted(v.created_at.dt.to_period("M").astype(str).unique())
     v = v[v.created_at.dt.to_period("M").astype(str) == month].copy()
+    if v.empty:
+        avail_str = ", ".join(available) if available else "(데이터 없음)"
+        raise ValueError(
+            f"[prep] '{month}' 월 데이터를 찾을 수 없습니다.\n"
+            f"  source='{source}'에서 사용 가능한 월: {avail_str}"
+        )
     v["day"] = v.created_at.dt.normalize()
     v["clean_title"] = v.title.map(clean_title)
     v["tags"] = v.description.map(hashtags)
@@ -471,7 +499,7 @@ def run_tracking(month):
     print(f"post coverage    : {cov:.1%}")
 
     # offline recall comparison (optional)
-    sfx    = "" if month == "2025-09" else f"_{month}"
+    sfx    = f"_{month}"
     offpkl = OUT / f"tracks_ml{sfx}.pkl"
     if offpkl.exists():
         O = pickle.load(open(offpkl, "rb"))["tracks"]
@@ -541,9 +569,9 @@ def set_korean_font():
 
 
 def viz_month(month):
-    """Plot streaming discovery timeline.  Saves figures/06_online_dynamics[_<month>].png."""
+    """Plot streaming discovery timeline.  Saves figures/online_dynamics[_<month>].png."""
     set_korean_font()
-    sfx = "" if month == "2025-09" else f"_{month}"
+    sfx = f"_{month}"
     on  = pickle.load(open(OUT / f"tracks_online{sfx}.pkl", "rb"))
     days = sorted(on["all_days"]); dstr = [d.strftime("%d") for d in days]
     bpd  = [on["births_per_day"][d] for d in days]
@@ -596,8 +624,8 @@ def viz_month(month):
     fig.suptitle(f"Online / Autoregressive 이벤트 트래킹 — {MLABEL}", fontsize=14.5, weight="bold")
     fig.tight_layout(rect=[0,0,1,0.95])
     FIGS.mkdir(parents=True, exist_ok=True)
-    fig.savefig(FIGS / f"06_online_dynamics{sfx}.png", dpi=140, bbox_inches="tight")
-    print(f"saved figures/06_online_dynamics{sfx}.png")
+    fig.savefig(FIGS / f"online_dynamics{sfx}.png", dpi=140, bbox_inches="tight")
+    print(f"saved figures/online_dynamics{sfx}.png")
 
 
 # =============================================================================
@@ -651,7 +679,7 @@ def _and_label(posts, ids, n=4):
 
 def build_month_data(month):
     """Load tracks + embeddings for one month, build the JS data blob."""
-    sfx    = "" if month == "2025-09" else f"_{month}"
+    sfx    = f"_{month}"
     D      = pickle.load(open(OUT / f"tracks_online{sfx}.pkl", "rb"))
     tracks, all_days = D["tracks"], sorted(D["all_days"])
     di     = {d: i for i, d in enumerate(all_days)}
@@ -696,7 +724,18 @@ def build_month_data(month):
 
 def html_export(months=None):
     """Build self-contained online_replay.html covering all specified months."""
-    if months is None: months = MONTHS
+    if months is None:
+        pkls = sorted(OUT.glob("tracks_online*.pkl"))
+        months = []
+        for p in pkls:
+            m = p.stem.replace("tracks_online_", "")
+            months.append(m)
+        if not months:
+            raise FileNotFoundError(
+                f"export할 track 결과물이 없습니다. 먼저 track을 실행하세요.\n"
+                f"  탐색 경로: {OUT}"
+            )
+        print(f"[export] track 완료된 월 자동 감지: {months}")
     data = {m: build_month_data(m) for m in months}
     html = HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     out  = ROOT / "online_replay.html"
@@ -930,8 +969,19 @@ def pii_guard():
 def upload_to_hf():
     """Upload staged parquets + README to private HF dataset."""
     from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError, HfHubHTTPError
     api = HfApi()
-    api.create_repo(HF_REPO, repo_type="dataset", private=True, exist_ok=True)
+    try:
+        api.create_repo(HF_REPO, repo_type="dataset", private=True, exist_ok=True)
+    except (RepositoryNotFoundError, HfHubHTTPError):
+        raise PermissionError(
+            f"HuggingFace 인증 실패 — 업로드 권한이 없습니다.\n"
+            f"  repo: {HF_REPO}\n\n"
+            f"  토큰을 설정하세요:\n"
+            f"    export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
+            f"  또는 로그인:\n"
+            f"    hf auth login"
+        )
     (STAGE / "README.md").write_text(HF_CARD, encoding="utf-8")
     for t in UPLOAD_TABLES + ["README"]:
         fn = f"{t}.parquet" if t != "README" else "README.md"

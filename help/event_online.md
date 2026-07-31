@@ -9,16 +9,25 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │  데이터 입력                                                        │
 │  source="hf"    → HuggingFace private 데이터셋 (권장)              │
-│  source="local" → 로컬 mysqldump (.sql.gz) 직접 파싱               │
+│  source="local" → 로컬 mysqldump (.sql/.sql.gz)                   │
+│    ※ local 사용 시: extract를 반드시 먼저 실행 (dump → parquet)     │
 │  → 어느 쪽을 써도 이후 처리는 완전히 동일한 코드로 흐름               │
 ├──────────────────────────────────────────────────────────────────┤
-│  파이프라인                                                          │
-│  prep → track → viz → export                                      │
+│  분석 파이프라인  (all 명령으로 한번에 실행 가능)                       │
+│  [local만] extract → prep → track → viz → export                 │
+│  [hf]              prep → track → viz → export                   │
 │                                                                    │
-│  prep   : 제목 정제·kiwi 명사·ko-sroberta 임베딩 (GPU 권장)         │
-│  track  : 인과적 트래킹 (HDBSCAN + EMA, 미래 데이터 없음)            │
-│  viz    : 일별 birth/revival 타임라인 그림                           │
-│  export : 자립형 일별 리플레이 HTML                                   │
+│  extract : 로컬 dump → parquet 캐시 (local 소스 사용 시 필수)       │
+│  prep    : 제목 정제·kiwi 명사·ko-sroberta 임베딩 (GPU 권장)        │
+│  track   : 인과적 트래킹 (HDBSCAN + EMA, 미래 데이터 없음)           │
+│  viz     : 일별 birth/revival 타임라인 그림                          │
+│  export  : 자립형 일별 리플레이 HTML                                  │
+├──────────────────────────────────────────────────────────────────┤
+│  선택: HuggingFace 업로드  (분석과 독립적으로 실행)                    │
+│  upload  : 로컬 dump → PII 가드 → HF private 데이터셋 업로드         │
+│    - 금지 컬럼(password, email 등) 발견 시 자동 중단                  │
+│    - 댓글 author SHA-256 가명화 검증 후 업로드                        │
+│    --dry-run 옵션으로 PII 가드만 확인 (업로드 없음)                    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -27,13 +36,13 @@
 ## 파일 구조
 
 ```
-mindcast/
+root/
 ├── config/event_online_config.py      # 모든 상수·환경변수·파라미터
 ├── utils/event_online_utils.py        # 전체 유틸리티 함수 (6개 섹션)
 ├── pipeline/event_online_pipeline.py  # 실행 파이프라인 (CLI)
 └── run/event_online_run.sh            # 쉘 실행 스크립트
 
-mindcast_online/                       # 원본 프로젝트 (데이터·산출물)
+root/data/event_online/ [데이터, 산출물]
 ├── data/
 │   ├── posts_<month>.parquet          # 정제된 영상 메타·키프레이즈
 │   └── emb_<month>.npy               # ko-sroberta 임베딩 (N×768)
@@ -41,7 +50,7 @@ mindcast_online/                       # 원본 프로젝트 (데이터·산출�
 │   ├── tracks_online[_<month>].pkl   # 트랙 상태 전체
 │   └── events_online[_<month>].csv   # 이벤트 요약 표
 ├── figures/
-│   └── 06_online_dynamics[_<month>].png
+│   └── online_dynamics[_<month>].png
 ├── hf_staging/                        # HF 업로드 전 임시 parquet
 └── online_replay.html                 # 일별 리플레이 HTML
 ```
@@ -50,12 +59,13 @@ mindcast_online/                       # 원본 프로젝트 (데이터·산출�
 
 ## 실행 순서
 
+### HuggingFace 소스 사용 시
+
 ```bash
 cd mindcast/run
 
-# ── 1) 표현 생성 (GPU 필요) ────────────────────────────────────
-./event_online_run.sh -g 0 prep 2025-09 hf      # HuggingFace 소스
-./event_online_run.sh -g 0 prep 2025-09 local   # 로컬 덤프 소스
+# ── 1) 표현 생성 (GPU 권장) ────────────────────────────────────
+./event_online_run.sh -g 0 prep 2025-09 hf
 
 # ── 2) 온라인 트래킹 ───────────────────────────────────────────
 ./event_online_run.sh track 2025-09
@@ -64,19 +74,38 @@ cd mindcast/run
 ./event_online_run.sh viz 2025-09
 
 # ── 4) HTML 리플레이 ───────────────────────────────────────────
-./event_online_run.sh export                        # config MONTHS 전체
-./event_online_run.sh export 2025-09,2025-10,2025-11
+./event_online_run.sh export                          # 완료된 월 자동 감지
+./event_online_run.sh export 2025-09,2025-10,2025-11  # 특정 월만
 
 # ── 전체 한번에 (prep→track→viz→export) ────────────────────────
 ./event_online_run.sh -g 0 all 2025-09 hf
+```
 
-# ── 선택: 로컬 덤프 → parquet 캐시 ────────────────────────────
-./event_online_run.sh extract
-./event_online_run.sh extract --with-comments
+### 로컬 SQL 덤프 사용 시
 
-# ── 선택: HF 업로드 ────────────────────────────────────────────
-./event_online_run.sh upload --dry-run   # PII 가드만
-./event_online_run.sh upload             # 실제 업로드
+로컬 덤프를 소스로 쓸 경우 **extract를 반드시 먼저 실행**해야 합니다.
+
+```bash
+cd mindcast/run
+
+# ── 0) 로컬 덤프 → parquet 캐시 (필수 선행 단계) ──────────────
+./event_online_run.sh extract                  # video_video + video_channel
+./event_online_run.sh extract --with-comments  # video_comment 포함
+
+# ── 1) 표현 생성 ───────────────────────────────────────────────
+./event_online_run.sh -g 0 prep 2025-09 local
+
+# ── 2~4) 이후 동일 ────────────────────────────────────────────
+./event_online_run.sh track 2025-09
+./event_online_run.sh viz   2025-09
+./event_online_run.sh export
+```
+
+### HF 업로드 (선택)
+
+```bash
+./event_online_run.sh upload --dry-run   # PII 가드만 (업로드 없음)
+./event_online_run.sh upload             # PII 가드 + HF 업로드
 ```
 
 또는 Python 직접 실행:
@@ -153,7 +182,7 @@ outputs/
 └── events_online[_<month>].csv   ← 이벤트 요약 표 (id, label, status, birth, n_posts, n_comments, ...)
 ```
 
-> 2025-09 기준 월의 파일은 접미사 없음 (`tracks_online.pkl`), 이후 월은 `tracks_online_<month>.pkl`
+> 모든 월 동일하게 `tracks_online_<month>.pkl` 형식으로 저장됩니다.
 
 ---
 
@@ -168,10 +197,10 @@ outputs/
 **산출물:**
 ```
 figures/
-└── 06_online_dynamics[_<month>].png    ← birth/revival 타임라인 + 누적 이벤트 수
+└── online_dynamics[_<month>].png    ← birth/revival 타임라인 + 누적 이벤트 수
 ```
 
-> 2025-09는 `06_online_dynamics.png`, 이후 월은 `06_online_dynamics_<month>.png`
+> 모든 월 동일하게 `online_dynamics_<month>.png` 형식으로 저장됩니다.
 
 ---
 
@@ -217,8 +246,8 @@ HuggingFace: $MINDCAST_HF_REPO      ← private dataset (위 3개 파일)
 
 ### Pipeline 5 — extract (로컬 캐시)
 
-로컬 덤프를 자주 쓸 때 속도 향상용 parquet 캐시 생성.  
-파이프라인 자체는 이 캐시 없이도 동작합니다.
+`source=local`로 분석 파이프라인을 실행하기 전 **반드시 먼저 실행**해야 합니다.  
+로컬 mysqldump(`.sql.gz`)를 파싱해 parquet 캐시를 생성합니다.
 
 입력: `$MINDCAST_DUMP`
 
