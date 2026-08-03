@@ -38,12 +38,14 @@ usage() {
     echo "  -h        도움말"
     echo ""
     echo "Commands:"
-    echo "  preprocess          01~04 전처리 (HuggingFace → parquet → KOTE → 토픽)"
-    echo "  ablation [mode]     일별 Ablation A~F  (mode: nb|point, 기본 nb)"
-    echo "  parallel [mode]     일별 Ablation 병렬 실행"
-    echo "  main                메인 모델 확정·저장 (Setting A)"
-    echo "  monthly             월별 자살자수 × 7 조합 RidgeCV"
-    echo "  all                 전처리 → ablation → main → monthly"
+    echo "  preprocess              01~04 전처리 (HuggingFace → parquet → KOTE → 토픽)"
+    echo "  ablation [mode]         일별 Ablation A~F  (mode: nb|point, 기본 nb)"
+    echo "  parallel [mode]         일별 Ablation 병렬 실행"
+    echo "  main                    메인 모델 확정·저장 (Setting A)"
+    echo "  monthly                 월별 자살자수 × 7 조합 RidgeCV"
+    echo "  main-infer <start> [end]  일별 예측 (main_model.pt, YYYY-MM-DD)"
+    echo "  monthly-infer <month>   월별 자살자수 예측 (미래 월, YYYY-MM)"
+    echo "  all                     전처리 → ablation → main → monthly"
     echo ""
     echo "Examples:"
     echo "  ./suicide_run.sh -g 2 preprocess"
@@ -52,6 +54,9 @@ usage() {
     echo "  ./suicide_run.sh -g 2 parallel"
     echo "  ./suicide_run.sh -g 2 main"
     echo "  ./suicide_run.sh -g 2 monthly"
+    echo "  ./suicide_run.sh    main-infer 2024-01-01"
+    echo "  ./suicide_run.sh    main-infer 2024-01-01 2024-01-31"
+    echo "  ./suicide_run.sh    monthly-infer 2024-03"
     echo "  ./suicide_run.sh -g 2 all"
 }
 
@@ -144,6 +149,25 @@ do_monthly() {
     ok "=== 월별 예측 완료 ==="
 }
 
+do_monthly_infer() {
+    local month="${1:-}"
+    [[ -z "$month" ]] && die "월을 지정하세요 (예: ./suicide_run.sh monthly-infer 2024-03)"
+    log "=== [월별 inference] $month ==="
+    run_py suicide_pipeline.py --run monthly-infer --start "$month"
+    ok "=== 월별 inference 완료 ==="
+}
+
+do_infer() {
+    local start="${1:-}"; local end="${2:-}"
+    [[ -z "$start" ]] && die "날짜를 지정하세요 (예: ./suicide_run.sh infer 2024-01-01)"
+    local args="--start $start"
+    [[ -n "$end" ]] && args="$args --end $end"
+    log "=== [일별 예측] $start ${end:+~ $end} ==="
+    # shellcheck disable=SC2086
+    run_py suicide_pipeline.py --run infer $args
+    ok "=== 예측 완료 ==="
+}
+
 do_all() {
     log "=== 전체 파이프라인 시작 ==="
     do_preprocess
@@ -165,7 +189,9 @@ case "$CMD" in
     parallel)     do_parallel  "${1:-nb}" ;;
     main)         do_main ;;
     monthly)      do_monthly ;;
-    all)          do_all ;;
+    main-infer)      do_infer "${1:-}" "${2:-}" ;;
+    monthly-infer)   do_monthly_infer "${1:-}" ;;
+    all)             do_all ;;
     ""|--help|-h) usage ;;
     *) die "알 수 없는 명령: $CMD\n\n$(usage)" ;;
 esac

@@ -10,6 +10,8 @@ DATA        = ROOT / "data"
 OUT         = ROOT / "outputs"
 DELIVERABLE = ROOT / "deliverable"
 CK          = OUT / "checkpoints"
+PRED_MAIN   = ROOT / "prediction" / "main"
+PRED_MONTH  = ROOT / "prediction" / "monthly"
 
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
@@ -33,11 +35,6 @@ EMO_GROUPS = {
     "중립": ["우쭐댐/무시함","공포/무서움","비장함","없음","깨달음","놀람"],
 } #mapping version 1 
 
-SPLITS = {
-    "train": ("2020-01-01", "2021-12-31"),
-    "valid": ("2022-01-01", "2022-12-31"),
-    "test":  ("2023-01-01", "2023-12-31"),
-}
 
 # ── Training ────────────────────────────────────────────────────────────
 SEEDS  = [42, 1, 7, 2025]
@@ -75,7 +72,6 @@ CALL_REPO         = "MindCastSogang/suicide_prevent_call"
 # ── 전처리: 댓글 데이터 ────────────────────────────────────────────────
 COMMENT_REPO      = "MindCastSogang/Youtube_news_preprocessed_data"
 COMMENT_BASE_DIR  = "preprocessed/v1"
-COMMENT_YEARS     = [2020, 2021, 2022, 2023]
 
 # ── 전처리: KOTE 감정 추론 ───────────────────────────────────────────────
 KOTE_MODEL  = "searle-j/kote_for_easygoing_people"
@@ -83,7 +79,6 @@ KOTE_BATCH  = 512
 KOTE_MAXLEN = 128
 
 # ── 전처리: 토픽 클러스터링 ──────────────────────────────────────────────
-TOPIC_TRAIN_END = "2021-12-31"
 
 # ── Monthly suicide (월별 예측기) ────────────────────────────────────────
 REPO     = "MindCastSogang/SuicideDataset"
