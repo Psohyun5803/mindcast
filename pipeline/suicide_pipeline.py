@@ -38,8 +38,8 @@ import pandas as pd
 import torch
 
 from suicide_config import (
-    CK, DELIVERABLE, METRICS, OUT, SEEDS, FONT_PATH,
-    MAIN_CFG,
+    CK, DELIVERABLE, METRICS, OUT, RAW, SEEDS, FONT_PATH,
+    MAIN_CFG, PRED_MAIN, PRED_MONTH,
 )
 from suicide_utils import (
     # preprocessing
@@ -47,9 +47,10 @@ from suicide_utils import (
     # suite
     experiments, run_one, write_tables,
     # training
-    run,
+    run, MODELS,
     # monthly
     build_monthly, expanding_eval, baseline_eval,
+    build_monthly_infer, monthly_infer_predict,
 )
 
 # ── 색상 출력 ────────────────────────────────────────────────────────────────
@@ -141,7 +142,7 @@ def lock_main_model():
     agg = {sp: {m: [] for m in ["MAE", "RMSE", "MASE", "WAPE", "sMAPE",
                                   "Cov80", "Cov90", "Width80", "Width90"]}
            for sp in ["valid", "test"]}
-    preds0 = model0 = meta0 = None
+    preds0 = model0 = meta0 = res0 = None
 
     for sd in SEEDS:
         res, preds, model, meta, data = run(MAIN_CFG, seed=sd, lr=5e-4, wd=5e-4)
@@ -149,12 +150,13 @@ def lock_main_model():
             for m in agg[sp]:
                 agg[sp][m].append(res[sp][m])
         if sd == 42:
-            preds0, model0, meta0 = preds, model, meta
+            preds0, model0, meta0, res0 = preds, model, meta, res
 
     summary = {sp: {m: (round(float(np.mean(v)), 4), round(float(np.std(v)), 4))
                     for m, v in agg[sp].items()} for sp in ["valid", "test"]}
 
-    torch.save({"state_dict": model0.state_dict(), "cfg": MAIN_CFG, "meta": meta0},
+    torch.save({"state_dict": model0.state_dict(), "cfg": MAIN_CFG, "meta": meta0,
+                "q80": res0.get("_q80"), "q90": res0.get("_q90")},
                CK / "main_model.pt")
     preds0["test"].to_parquet(OUT / "predictions" / "MAIN_test.parquet")
 
@@ -211,14 +213,103 @@ def lock_main_model():
 
 
 # ════════════════════════════════════════════════════════════════════════
+# Pipeline 2.5 — 일별 예측기: inference (main_model.pt 이용)
+# ════════════════════════════════════════════════════════════════════════
+
+def run_infer(start_date, end_date=None):
+    ckpt_path = CK / "main_model.pt"
+    if not ckpt_path.exists():
+        die("main_model.pt가 없습니다. 먼저 main을 실행하세요:\n"
+            "  ./suicide_run.sh main")
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg, meta = ckpt["cfg"], ckpt["meta"]
+    q80 = ckpt.get("q80"); q90 = ckpt.get("q90")
+    y_mu = np.float32(meta["y_mu"]); y_sd = np.float32(meta["y_sd"])
+    lookback = cfg.get("lookback", 56)
+
+    if not (RAW / "target_call_counts.parquet").exists():
+        die("target_call_counts.parquet 없음. 먼저 preprocess를 실행하세요:\n"
+            "  ./suicide_run.sh preprocess")
+
+    target = pd.read_parquet(RAW / "target_call_counts.parquet")
+    target["date"] = pd.to_datetime(target["date"]).dt.normalize()
+    target = target.sort_values("date").reset_index(drop=True)
+
+    ModelCls = MODELS[cfg["model"]]
+    model = ModelCls(
+        meta,
+        hidden=cfg.get("hidden", 64),
+        dropout=cfg.get("dropout", 0.5),
+        use_calendar=False, use_volume=False,
+        use_emotion=False, use_topic=False, use_interaction=False,
+        dynamic_gate=False, emotion_dropout=0.0,
+        head=cfg.get("head", "point"),
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    start = pd.Timestamp(start_date)
+    end   = pd.Timestamp(end_date) if end_date else start
+
+    rows = []
+    for tdate in pd.date_range(start, end, freq="D"):
+        hist = target[target["date"] < tdate].tail(lookback)
+        if len(hist) < lookback:
+            log(f"  {tdate.date()} : lookback 데이터 부족 ({len(hist)}/{lookback}일), skip")
+            continue
+        if hist["date"].max() < tdate - pd.Timedelta(days=1):
+            die(f"예측 불가: {tdate.date()} 직전 데이터가 없습니다 "
+                f"(마지막 데이터: {hist['date'].max().date()})\n"
+                "  HF에서 최신 데이터를 받아 preprocess를 다시 실행하세요:\n"
+                "  ./suicide_run.sh preprocess")
+        y_raw  = hist["y"].values.astype(np.float32)
+        logy_n = (np.log1p(y_raw).reshape(-1, 1) - y_mu) / y_sd
+        y_base = float(max(1.0, y_raw[-7:].mean()))
+
+        batch = {
+            "y_past": torch.tensor(logy_n[np.newaxis], dtype=torch.float32),
+            "y_base": torch.tensor([[y_base]], dtype=torch.float32),
+        }
+        with torch.no_grad():
+            mu = float(model(batch)["mu"].item())
+
+        row = {"date": tdate.date(), "pred_mean": round(mu, 1)}
+        if q80 is not None:
+            row["lo80"] = round(max(0.0, mu - q80), 1)
+            row["hi80"] = round(mu + q80, 1)
+        if q90 is not None:
+            row["lo90"] = round(max(0.0, mu - q90), 1)
+            row["hi90"] = round(mu + q90, 1)
+        rows.append(row)
+
+    if not rows:
+        die("예측 가능한 날짜가 없습니다 (과거 데이터 부족)")
+
+    PRED_MAIN.mkdir(parents=True, exist_ok=True)
+    result = pd.DataFrame(rows)
+    tag = f"{start_date}_to_{end_date or start_date}"
+    out_path = PRED_MAIN / f"infer_{tag}.csv"
+    result.to_csv(out_path, index=False)
+    print(result.to_string(index=False))
+    ok(f"저장: {out_path}")
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Pipeline 3 — 월별 예측기: 자살자수 × 7 피처 조합 (13_monthly_suicide.py)
 # ════════════════════════════════════════════════════════════════════════
 
 def run_monthly_suicide():
     df, S, E, T = build_monthly()
+
+    # 마지막 2년(valid 1년 + test 1년)의 시작월을 eval_start로 설정
+    # df 자체의 교집합 범위(socio ∩ comments)에서 직접 계산
+    eval_start = str(df.month.max() - 23)  # "YYYY-MM"
+
     print(f"[data] {len(df)} months {df.month.min()}..{df.month.max()} | "
           f"S={len(S)} E={len(E)} T={len(T)} feats | "
           f"target mean {df.y.mean():.0f} std {df.y.std():.0f}")
+    print(f"[monthly] 평가 시작월: {eval_start}  (test 시작: {df.month.max() - 11})")
 
     combos = {
         "1.사회경제(S)": S,       "2.감정(E)": E,         "3.토픽(T)": T,
@@ -226,15 +317,20 @@ def run_monthly_suicide():
         "7.S+E+T":      S + E + T,
     }
     rows = []
+    detail = None
     for name, cols in combos.items():
-        r = expanding_eval(df, cols)
+        r, preds = expanding_eval(df, cols, start=eval_start)
         rows.append(dict(model=name, n_feat=len(cols), **{k: round(v, 3) for k, v in r.items()}))
+        if detail is None:
+            detail = preds[["month", "y_true"]].copy()
+        detail[name] = preds["y_pred"].values
     for bn, bk in [("기준:계절평균", "seasonal_mean"), ("기준:lag-12", "lag12")]:
-        r = baseline_eval(df, bk)
+        r = baseline_eval(df, bk, start=eval_start)
         rows.append(dict(model=bn, n_feat=0, **{k: round(v, 3) for k, v in r.items()}))
 
     res = pd.DataFrame(rows)
     res.to_csv(DELIVERABLE / "monthly_suicide_7models.csv", index=False)
+    detail.to_csv(DELIVERABLE / "monthly_predictions_detail.csv", index=False)
 
     print(f"\n=== 월별 자살자수 예측 — 확장윈도우 1-step "
           f"(test {rows[0]['n']}개월: 2022-01~2023-10) ===")
@@ -262,6 +358,46 @@ def run_monthly_suicide():
     fig.tight_layout()
     fig.savefig(DELIVERABLE / "14_monthly_suicide_7models.png", dpi=140)
     print("\nsaved deliverable/14_monthly_suicide_7models.png, monthly_suicide_7models.csv")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Pipeline 3.5 — 월별 예측기: 미래 월 inference
+# ════════════════════════════════════════════════════════════════════════
+
+def run_monthly_infer(target_month):
+    log(f"=== [월별 inference] {target_month} 자살자수 예측 ===")
+
+    train_df, target_feats, S, Ecols, Tcols, has_S, has_E, has_T = \
+        build_monthly_infer(target_month)
+
+    log(f"피처 가용:  S={'O' if has_S else 'X'}  E={'O' if has_E else 'X'}  T={'O' if has_T else 'X'}")
+    log(f"학습 데이터: {len(train_df)}개월 ({train_df['month'].min()} ~ {train_df['month'].max()})")
+
+    if not (has_S or has_E or has_T):
+        die(f"{target_month}: 예측 가능한 피처가 없습니다.\n"
+            "  preprocess 후 재시도하거나, 사회경제 데이터 업데이트를 확인하세요.")
+
+    combos = {}
+    if has_S:              combos["1.S"]     = S
+    if has_E:              combos["2.E"]     = Ecols
+    if has_T:              combos["3.T"]     = Tcols
+    if has_S and has_E:   combos["4.S+E"]   = S + Ecols
+    if has_S and has_T:   combos["5.S+T"]   = S + Tcols
+    if has_E and has_T:   combos["6.E+T"]   = Ecols + Tcols
+    if has_S and has_E and has_T: combos["7.S+E+T"] = S + Ecols + Tcols
+
+    rows = []
+    for name, cols in combos.items():
+        pred = monthly_infer_predict(train_df, target_feats, cols)
+        rows.append({"model": name, "pred_자살자수": round(pred, 1)})
+        log(f"  {name:10s} → {pred:.1f}명")
+
+    PRED_MONTH.mkdir(parents=True, exist_ok=True)
+    result = pd.DataFrame(rows)
+    out_path = PRED_MONTH / f"infer_{target_month}.csv"
+    result.to_csv(out_path, index=False)
+    print(result.to_string(index=False))
+    ok(f"저장: {out_path}")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -294,32 +430,46 @@ def run_parallel_aggregate(mode="nb"):
 def main():
     ap = argparse.ArgumentParser(description="Suicide forecasting pipelines")
     ap.add_argument("--run", required=True,
-                    choices=["preprocess", "ablation", "main", "monthly", "parallel"],
+                    choices=["preprocess", "ablation", "main", "monthly", "monthly-infer",
+                             "parallel", "main-infer"],
                     help="Which pipeline to execute")
-    ap.add_argument("--mode",      default="nb",  help="Suite mode: nb | point")
-    ap.add_argument("--gpu",       type=int, default=None, help="[preprocess] KOTE 추론 GPU 번호")
-    ap.add_argument("--idx",       type=int, default=-1,   help="[parallel] worker index")
-    ap.add_argument("--aggregate", action="store_true",    help="[parallel] aggregate parts")
-    ap.add_argument("--list",      action="store_true",    help="[parallel] list experiment count")
+    ap.add_argument("--mode",      default="nb",   help="Suite mode: nb | point")
+    ap.add_argument("--gpu",       type=int, default=None,  help="[preprocess] KOTE 추론 GPU 번호")
+    ap.add_argument("--idx",       type=int, default=-1,    help="[parallel] worker index")
+    ap.add_argument("--aggregate", action="store_true",     help="[parallel] aggregate parts")
+    ap.add_argument("--list",      action="store_true",     help="[parallel] list experiment count")
+    ap.add_argument("--start",     default=None,            help="[infer] 예측 시작일 YYYY-MM-DD")
+    ap.add_argument("--end",       default=None,            help="[infer] 예측 종료일 YYYY-MM-DD (생략 시 start 하루만)")
     a = ap.parse_args()
 
-    if a.run == "preprocess":
-        run_preprocess(gpu=a.gpu)
-    elif a.run == "ablation":
-        run_ablation_suite(mode=a.mode)
-    elif a.run == "main":
-        lock_main_model()
-    elif a.run == "monthly":
-        run_monthly_suicide()
-    elif a.run == "parallel":
-        exps = experiments(a.mode)
-        if a.list:
-            print(len(exps)); return
-        if a.aggregate:
-            run_parallel_aggregate(mode=a.mode); return
-        if a.idx < 0:
-            ap.error("--idx required for parallel worker")
-        run_parallel_worker(a.idx, mode=a.mode)
+    try:
+        if a.run == "preprocess":
+            run_preprocess(gpu=a.gpu)
+        elif a.run == "ablation":
+            run_ablation_suite(mode=a.mode)
+        elif a.run == "main":
+            lock_main_model()
+        elif a.run == "monthly":
+            run_monthly_suicide()
+        elif a.run == "monthly-infer":
+            if not a.start:
+                ap.error("--start YYYY-MM 이 필요합니다")
+            run_monthly_infer(a.start)
+        elif a.run == "main-infer":
+            if not a.start:
+                ap.error("--start YYYY-MM-DD 가 필요합니다")
+            run_infer(a.start, a.end)
+        elif a.run == "parallel":
+            exps = experiments(a.mode)
+            if a.list:
+                print(len(exps)); return
+            if a.aggregate:
+                run_parallel_aggregate(mode=a.mode); return
+            if a.idx < 0:
+                ap.error("--idx required for parallel worker")
+            run_parallel_worker(a.idx, mode=a.mode)
+    except FileNotFoundError as e:
+        die(str(e))
 
 
 if __name__ == "__main__":

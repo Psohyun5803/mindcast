@@ -61,7 +61,10 @@ def run_prep(month, source="hf", gpu=None):
     from event_online_utils import prep_month
     log(f"[prep] month={month}  source={source}  gpu={gpu or 'auto'}")
     t0 = time.time()
-    prep_month(month, source=source)
+    try:
+        prep_month(month, source=source)
+    except (ValueError, FileNotFoundError, PermissionError) as e:
+        die(str(e))
     ok(f"[prep] {time.time()-t0:.0f}s → data/posts_{month}.parquet, data/emb_{month}.npy")
 
 
@@ -78,9 +81,18 @@ def run_prep(month, source="hf", gpu=None):
 
 def run_track(month):
     from event_online_utils import run_tracking
+    from event_online_config import DATA
     log(f"[track] month={month}")
+    posts_path = DATA / f"posts_{month}.parquet"
+    if not posts_path.exists():
+        die(f"prep 결과물이 없습니다: {posts_path}\n"
+            f"  먼저 prep을 실행하세요:\n"
+            f"    ./event_online_run.sh prep {month} hf")
     t0 = time.time()
-    tracks, summary = run_tracking(month)
+    try:
+        tracks, summary = run_tracking(month)
+    except (FileNotFoundError, ValueError) as e:
+        die(str(e))
     ok(f"[track] {time.time()-t0:.0f}s  "
        f"확정={summary['n_events']}  커버리지={summary['coverage']:.1%}  "
        f"부활={summary['revived']}")
@@ -91,15 +103,23 @@ def run_track(month):
 #   · 일별 birth + revival 막대그래프 + 누적 이벤트 수
 #   · 오프라인 pkl이 있으면 온/오프라인 비교 텍스트 추가
 #   입력: outputs/tracks_online[_<month>].pkl
-#   출력: figures/06_online_dynamics[_<month>].png
+#   출력: figures/online_dynamics[_<month>].png
 # ════════════════════════════════════════════════════════════════════════
 
 def run_viz(month):
     from event_online_utils import viz_month
+    from event_online_config import OUT
     log(f"[viz] month={month}")
-    viz_month(month)
-    sfx = "" if month == "2025-09" else f"_{month}"
-    ok(f"[viz] → figures/06_online_dynamics{sfx}.png")
+    pkl_path = OUT / f"tracks_online_{month}.pkl"
+    if not pkl_path.exists():
+        die(f"track 결과물이 없습니다: {pkl_path}\n"
+            f"  먼저 track을 실행하세요:\n"
+            f"    ./event_online_run.sh track {month}")
+    try:
+        viz_month(month)
+    except (FileNotFoundError, ValueError) as e:
+        die(str(e))
+    ok(f"[viz] → figures/online_dynamics_{month}.png")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -113,12 +133,20 @@ def run_viz(month):
 # ════════════════════════════════════════════════════════════════════════
 
 def run_export(months=None):
-    from event_online_config import MONTHS as DEFAULT_MONTHS
     from event_online_utils import html_export
-    mlist = months or DEFAULT_MONTHS
-    log(f"[export] months={mlist}")
+    from event_online_config import OUT
+    log(f"[export] months={months or 'auto-detect'}")
+    if months:
+        missing = [m for m in months if not (OUT / f"tracks_online_{m}.pkl").exists()]
+        if missing:
+            die(f"track 결과물이 없는 월: {', '.join(missing)}\n"
+                f"  먼저 track을 실행하세요:\n"
+                + "\n".join(f"    ./event_online_run.sh track {m}" for m in missing))
     t0 = time.time()
-    html_export(mlist)
+    try:
+        html_export(months)
+    except (FileNotFoundError, ValueError) as e:
+        die(str(e))
     ok(f"[export] {time.time()-t0:.0f}s → online_replay.html")
 
 
@@ -134,14 +162,24 @@ def run_export(months=None):
 
 def run_upload(dry_run=False):
     from event_online_utils import build_staging, pii_guard, upload_to_hf
-    from event_online_config import HF_REPO
+    from event_online_config import HF_REPO, DUMP
     log(f"[upload] dry_run={dry_run}  target={HF_REPO}")
-    build_staging()
-    pii_guard()
+    if not DUMP:
+        die("MINDCAST_DUMP 환경변수가 설정되지 않았습니다.\n"
+            "  export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql\n"
+            "  export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz")
+    try:
+        build_staging()
+        pii_guard()
+    except (FileNotFoundError, ValueError, AssertionError) as e:
+        die(str(e))
     if dry_run:
         ok("[upload] dry-run 완료 — PII 가드 통과, 업로드 생략")
         return
-    upload_to_hf()
+    try:
+        upload_to_hf()
+    except PermissionError as e:
+        die(str(e))
     ok(f"[upload] 완료 → https://huggingface.co/datasets/{HF_REPO}")
 
 

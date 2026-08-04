@@ -37,12 +37,11 @@ from tqdm import tqdm
 
 from suicide_config import (
     EMO, TOP, RAW, DATA, OUT, CK,
-    N_EMO, SELECTED_EMO, GROUP_ORDER, EMO_GROUPS, SPLITS,
+    N_EMO, SELECTED_EMO, GROUP_ORDER, EMO_GROUPS,
     SEEDS, LR, WD, COMMON, ABL, ABL_DESC, METRICS,
     CALL_REPO,
-    COMMENT_REPO, COMMENT_BASE_DIR, COMMENT_YEARS,
+    COMMENT_REPO, COMMENT_BASE_DIR,
     KOTE_MODEL, KOTE_BATCH, KOTE_MAXLEN,
-    TOPIC_TRAIN_END,
     REPO, BASE_CSV, K_TOPIC, ALPHAS,
 )
 
@@ -58,8 +57,36 @@ for _d in ["metrics", "predictions", "checkpoints", "parts"]:
 # 0.  PREPROCESSING  (was 01~04번 스크립트)
 # ════════════════════════════════════════════════════════════════════════
 
+def _compute_splits(start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    """교집합 날짜 범위에서 train/valid/test split 자동 계산.
+    마지막 1년 = test, 그 전 1년 = valid, 나머지 = train.
+    """
+    test_end   = end
+    test_start = (test_end - pd.DateOffset(years=1) + pd.Timedelta(days=1))
+    valid_end  = test_start - pd.Timedelta(days=1)
+    valid_start = (valid_end - pd.DateOffset(years=1) + pd.Timedelta(days=1))
+    train_start = start
+    train_end   = valid_start - pd.Timedelta(days=1)
+    return {
+        "train": (str(train_start.date()), str(train_end.date())),
+        "valid": (str(valid_start.date()), str(valid_end.date())),
+        "test":  (str(test_start.date()),  str(test_end.date())),
+    }
+
+
+def load_splits() -> dict:
+    """preprocess 완료 후 저장된 splits.json을 읽어 반환."""
+    path = RAW / "splits.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            "splits.json이 없습니다. 먼저 preprocess를 실행하세요:\n"
+            "  ./suicide_run.sh preprocess"
+        )
+    return json.load(open(path))
+
+
 def build_target():
-    """01: HuggingFace → cache/raw/target_call_counts_2018_2023.parquet"""
+    """01: HuggingFace → cache/raw/target_call_counts.parquet + target_meta.json"""
     files = [f for f in list_repo_files(repo_id=CALL_REPO, repo_type="dataset")
              if f.endswith(".csv")]
     print(f"[target] {len(files)} csv files from {CALL_REPO}")
@@ -73,19 +100,47 @@ def build_target():
     t["date"] = pd.to_datetime(dict(year=t.year, month=t.month, day=t.day))
     t = t[["date", "y"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
     RAW.mkdir(parents=True, exist_ok=True)
-    out = RAW / "target_call_counts_2018_2023.parquet"
+    out = RAW / "target_call_counts.parquet"
     t.to_parquet(out)
-    print(f"[target] {len(t)} days {t.date.min().date()}..{t.date.max().date()} "
+    meta = {"start": str(t.date.min().date()), "end": str(t.date.max().date())}
+    json.dump(meta, open(RAW / "target_meta.json", "w"))
+    print(f"[target] {len(t)} days {meta['start']}..{meta['end']} "
           f"y range {t.y.min()}-{t.y.max()} mean {t.y.mean():.1f}")
     return out
 
 
 def build_comments():
-    """01: HuggingFace 댓글 JSON → cache/raw/youtube_news_comments.parquet"""
-    files = [f for f in list_repo_files(repo_id=COMMENT_REPO, repo_type="dataset")
-             if COMMENT_BASE_DIR in f and f.endswith("news_comments.json")
-             and any(f"/{y}/" in f for y in COMMENT_YEARS)]
-    files = sorted(files)
+    """02: HuggingFace 댓글 JSON → cache/raw/youtube_news_comments.parquet
+    target_meta.json의 날짜 범위를 읽어 HF에서 가용한 연도와 교집합만 다운로드.
+    전처리 후 splits.json 자동 계산·저장.
+    """
+    # target 범위 읽기
+    meta_path = RAW / "target_meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            "target_meta.json이 없습니다. build_target()을 먼저 실행하세요."
+        )
+    meta = json.load(open(meta_path))
+    target_start = pd.Timestamp(meta["start"])
+    target_end   = pd.Timestamp(meta["end"])
+
+    # HF에서 가용 연도 자동 탐지
+    all_files = list(list_repo_files(repo_id=COMMENT_REPO, repo_type="dataset"))
+    available_years = sorted({
+        int(p[2]) for f in all_files
+        if COMMENT_BASE_DIR in f and f.endswith("news_comments.json")
+        for p in [f.split("/")]
+        if len(p) > 2 and p[2].isdigit()
+    })
+    years = [y for y in available_years
+             if target_start.year <= y <= target_end.year]
+    print(f"[comments] HF 가용 연도: {available_years}  →  교집합: {years}")
+
+    files = sorted(
+        f for f in all_files
+        if COMMENT_BASE_DIR in f and f.endswith("news_comments.json")
+        and any(f"/{y}/" in f for y in years)
+    )
     print(f"[comments] {len(files)} json files to process")
     recs = []
     for f in tqdm(files, desc="parse"):
@@ -106,7 +161,20 @@ def build_comments():
     df = df[["comment_id", "date", "text", "title", "post_idx"]]
     out = RAW / "youtube_news_comments.parquet"
     df.to_parquet(out)
-    print(f"[comments] {len(df):,} comments {df.date.min().date()}..{df.date.max().date()}")
+
+    # 교집합 범위로 splits 자동 계산
+    comment_start = df.date.min()
+    comment_end   = df.date.max()
+    intersect_start = max(target_start, comment_start)
+    intersect_end   = min(target_end,   comment_end)
+    splits = _compute_splits(intersect_start, intersect_end)
+    json.dump(splits, open(RAW / "splits.json", "w"), indent=2)
+
+    print(f"[comments] {len(df):,} comments {comment_start.date()}..{comment_end.date()}")
+    print(f"[splits] 교집합 {intersect_start.date()}..{intersect_end.date()}")
+    print(f"  train: {splits['train'][0]} ~ {splits['train'][1]}")
+    print(f"  valid: {splits['valid'][0]} ~ {splits['valid'][1]}")
+    print(f"  test:  {splits['test'][0]}  ~ {splits['test'][1]}")
     return out
 
 
@@ -157,6 +225,11 @@ def kote_inference(device=None):
 
 def daily_emotion():
     """03: 댓글별 감정 → 일별 집계 → cache/emotion/daily_kote_features.parquet"""
+    if not (EMO / "comment_kote_probs.parquet").exists():
+        raise FileNotFoundError(
+            "\n\033[31m[ERROR] 전처리 파일이 없습니다. 먼저 kote_inference를 실행하세요:\033[0m\n"
+            "\033[33m  ./suicide_run.sh preprocess\033[0m"
+        )
     df = pd.read_parquet(EMO / "comment_kote_probs.parquet")
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     ecols = [f"emotion_{i}" for i in range(N_EMO)]
@@ -180,13 +253,19 @@ def daily_emotion():
 
 def topic_features():
     """04: 뉴스 제목 TF-IDF + KMeans → cache/topic/daily_topic_features.parquet"""
+    if not (RAW / "youtube_news_comments.parquet").exists():
+        raise FileNotFoundError(
+            "\n\033[31m[ERROR] 전처리 파일이 없습니다. 먼저 build_comments를 실행하세요:\033[0m\n"
+            "\033[33m  ./suicide_run.sh preprocess\033[0m"
+        )
     TOP.mkdir(parents=True, exist_ok=True)
     df = pd.read_parquet(RAW / "youtube_news_comments.parquet", columns=["date", "title"])
     df["date"]  = pd.to_datetime(df["date"]).dt.normalize()
     df["title"] = df["title"].fillna("").astype(str)
 
     uniq = df.drop_duplicates("title")[["date", "title"]].reset_index(drop=True)
-    train_titles = uniq.loc[uniq.date <= TOPIC_TRAIN_END, "title"]
+    topic_train_end = load_splits()["train"][1]
+    train_titles = uniq.loc[uniq.date <= topic_train_end, "title"]
     train_titles = train_titles[train_titles.str.len() > 0]
     print(f"[topic] {len(uniq)} unique titles, {len(train_titles)} train titles")
 
@@ -234,8 +313,22 @@ def _calendar(dates):
 
 
 def build_frame(emotion_mode="group"):
+    missing = [p for p in [
+        EMO / "emotion_labels.json",
+        RAW / "target_call_counts.parquet",
+        EMO / "daily_kote_features.parquet",
+        TOP / "daily_topic_features.parquet",
+        RAW / "splits.json",
+    ] if not p.exists()]
+    if missing:
+        names = "\n  ".join(p.name for p in missing)
+        raise FileNotFoundError(
+            f"\n\033[31m[ERROR] 전처리 파일이 없습니다. 먼저 preprocess를 실행하세요:\033[0m\n"
+            f"\033[33m  ./suicide_run.sh preprocess\033[0m\n\n"
+            f"  누락된 파일:\n  {names}"
+        )
     labels = json.load(open(EMO / "emotion_labels.json"))
-    target = pd.read_parquet(RAW / "target_call_counts_2018_2023.parquet")
+    target = pd.read_parquet(RAW / "target_call_counts.parquet")
     target["date"] = pd.to_datetime(target["date"]).dt.normalize()
     emo = pd.read_parquet(EMO / "daily_kote_features.parquet")
     emo["date"] = pd.to_datetime(emo["date"]).dt.normalize()
@@ -303,8 +396,9 @@ def make_datasets(lookback=56, horizon=1, emotion_mode="group"):
 
     n = len(frame)
 
+    splits = load_splits()
     def split_of(d):
-        for name, (a, b) in SPLITS.items():
+        for name, (a, b) in splits.items():
             if pd.Timestamp(a) <= d <= pd.Timestamp(b):
                 return name
         return None
@@ -613,9 +707,9 @@ def to_dev(ds):
 
 
 def mase_denominator(horizon):
-    t = pd.read_parquet(RAW / "target_call_counts_2018_2023.parquet")
+    t = pd.read_parquet(RAW / "target_call_counts.parquet")
     t["date"] = pd.to_datetime(t["date"])
-    a, b = SPLITS["train"]
+    a, b = load_splits()["train"]
     y = t[(t.date >= a) & (t.date <= b)].sort_values("date").y.values.astype(float)
     return np.mean(np.abs(y[7:] - y[:-7]))
 
@@ -699,6 +793,7 @@ def run(cfg, seed=42, epochs=200, patience=20, lr=1e-3, wd=1e-4, batch=32, verbo
             k = min(nq, int(np.ceil((nq + 1) * cov)))
             return float(svr[k - 1])
         q80, q90 = conf_q(0.8), conf_q(0.9)
+        res["_q80"] = q80; res["_q90"] = q90
 
     for split in ["valid", "test"]:
         with torch.no_grad():
@@ -850,6 +945,11 @@ def load_socio():
 
 
 def monthly_emotion():
+    if not (EMO / "comment_kote_probs.parquet").exists():
+        raise FileNotFoundError(
+            "\n\033[31m[ERROR] 전처리 파일이 없습니다. 먼저 preprocess를 실행하세요:\033[0m\n"
+            "\033[33m  ./suicide_run.sh preprocess\033[0m"
+        )
     df = pd.read_parquet(EMO / "comment_kote_probs.parquet",
                          columns=["date"] + [f"emotion_{i}" for i in range(44)])
     df["month"] = pd.PeriodIndex(pd.to_datetime(df["date"]), freq="M")
@@ -894,20 +994,75 @@ def build_monthly():
     return df, S, Ecols, Tcols
 
 
+def build_monthly_infer(target_month):
+    """
+    학습 데이터(y 있는 과거) + target_month 피처 벡터 반환.
+    S/E/T 가용 여부를 각각 체크해 사용 가능한 조합만 반환.
+    """
+    target_period = pd.Period(target_month, freq="M")
+
+    # train: y가 있는 과거 데이터
+    train_df, S, Ecols, Tcols = build_monthly()
+    train_df = train_df[train_df["y"].notna()].copy()
+
+    # S — socio에서 target_month 행 직접 조회 (y 없어도 됨)
+    socio_raw, _ = load_socio()
+    s_row = socio_raw[socio_raw["month"] == target_period]
+    has_S = len(s_row) > 0 and not s_row[S].isnull().any().any()
+
+    # E — 로컬 comments에서 계산
+    E_df = monthly_emotion()
+    e_row = E_df[E_df["month"] == target_period]
+    _Ecols = [c for c in E_df.columns if c != "month"]
+    has_E = len(e_row) > 0
+
+    # T — 로컬 comments에서 계산
+    T_df = monthly_topic()
+    t_row = T_df[T_df["month"] == target_period]
+    _Tcols = [c for c in T_df.columns if c != "month"]
+    has_T = len(t_row) > 0
+
+    # target feature 벡터 조립
+    target_feats = {}
+    if has_S:
+        for c in S:
+            target_feats[c] = float(s_row[c].values[0])
+    if has_E:
+        for c in _Ecols:
+            target_feats[c] = float(e_row[c].values[0])
+    if has_T:
+        for c in _Tcols:
+            target_feats[c] = float(t_row[c].values[0])
+
+    return train_df, target_feats, S, Ecols, Tcols, has_S, has_E, has_T
+
+
+def monthly_infer_predict(train_df, target_feats, cols):
+    """train_df[cols] 전체 학습 → target_feats 단일 예측."""
+    X_train = train_df[cols].values
+    y_train = train_df["y"].values
+    X_pred  = np.array([[target_feats[c] for c in cols]])
+    pipe = make_pipeline(StandardScaler(), RidgeCV(alphas=ALPHAS))
+    pipe.fit(X_train, y_train)
+    return float(pipe.predict(X_pred)[0])
+
+
 def expanding_eval(df, cols, start="2022-01", min_train=18):
     X = df[cols].values; y = df["y"].values
     m = df["month"].astype(str).values
-    ys, ps = [], []
+    ys, ps, ms = [], [], []
     for i in range(len(df)):
         if i < min_train or m[i] < start:
             continue
         pipe = make_pipeline(StandardScaler(), RidgeCV(alphas=ALPHAS))
         pipe.fit(X[:i], y[:i])
-        ps.append(pipe.predict(X[i:i + 1])[0]); ys.append(y[i])
+        ps.append(pipe.predict(X[i:i + 1])[0]); ys.append(y[i]); ms.append(m[i])
     ys, ps = np.array(ys), np.array(ps)
     r2 = 1 - ((ys - ps) ** 2).sum() / ((ys - ys.mean()) ** 2).sum()
-    return dict(R2=r2, MAE=np.abs(ys - ps).mean(),
-                RMSE=np.sqrt(((ys - ps) ** 2).mean()), n=len(ys))
+    metrics = dict(R2=r2, MAE=np.abs(ys - ps).mean(),
+                   RMSE=np.sqrt(((ys - ps) ** 2).mean()), n=len(ys))
+    preds = pd.DataFrame({"month": ms, "y_true": ys.round(1), "y_pred": ps.round(1)})
+    return metrics, preds
 
 
 def baseline_eval(df, kind, start="2022-01", min_train=18):

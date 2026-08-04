@@ -3,19 +3,34 @@
 # event_online_run.sh — mindcast-online 실행 스크립트
 #
 # Usage:
-#   ./event_online_run.sh [-g <GPU>] <command> [옵션]
+#   ./event_online_run.sh <command> [옵션]
+#   GPU 지정: -g <번호>  (prep/all 에서만 유효, 예: -g 0)
 #
-#   ./event_online_run.sh -g 0 prep 2025-09 hf        # 정제·임베딩 (GPU 필요)
-#   ./event_online_run.sh -g 0 prep 2025-09 local      # 로컬 덤프에서 읽기
-#   ./event_online_run.sh    track 2025-09              # 온라인 트래킹
-#   ./event_online_run.sh    viz   2025-09              # 시각화 (png)
-#   ./event_online_run.sh    export                     # 전체 월 HTML 리플레이
-#   ./event_online_run.sh    export 2025-09,2025-10     # 특정 월만 HTML
-#   ./event_online_run.sh    upload                     # PII 가드 + HF 업로드
-#   ./event_online_run.sh    upload --dry-run           # 업로드 없이 가드만
-#   ./event_online_run.sh    extract                    # 로컬 덤프 → parquet 캐시
-#   ./event_online_run.sh    extract --with-comments    # video_comment 포함
-#   ./event_online_run.sh -g 0 all 2025-09 hf          # prep→track→viz→export 한번에
+# ── 실행 흐름 ────────────────────────────────────────────────────
+#
+#   [HuggingFace 소스 사용 시]
+#     prep <YYYY-MM> hf → track <YYYY-MM> → viz <YYYY-MM> → export
+#
+#   [로컬 SQL 덤프 사용 시]
+#     extract              ← 반드시 먼저 실행 (덤프 → parquet 캐시)
+#     prep <YYYY-MM> local → track <YYYY-MM> → viz <YYYY-MM> → export
+#
+# ── 데이터 준비 ──────────────────────────────────────────────────
+#   extract                      # 로컬 덤프 → parquet 캐시 (로컬 사용 시 필수)
+#   extract --with-comments      # video_comment 포함
+#   upload  --dry-run            # PII 가드만 (업로드 없음)
+#   upload                       # PII 가드 + HF 업로드
+#
+# ── 분석 파이프라인 (순서대로 실행) ───────────────────────────────
+#   prep    <YYYY-MM> hf         # 1. 정제·임베딩  (예: prep 2026-01 hf)
+#   prep    <YYYY-MM> local      #    로컬 덤프 사용 시
+#   track   <YYYY-MM>            # 2. 온라인 이벤트 트래킹
+#   viz     <YYYY-MM>            # 3. 시각화 (png)
+#   export                       # 4. 전체 월 HTML 리플레이
+#   export  <YYYY-MM>,<YYYY-MM>  #    특정 월만 지정
+#
+# ── 한번에 실행 (prep → track → viz → export) ────────────────────
+#   all     <YYYY-MM> hf
 # ============================================================
 
 set -euo pipefail
@@ -40,24 +55,18 @@ usage() {
     echo "  -g <N>    GPU 번호 (prep/all 에서만 사용, 예: -g 0)"
     echo "  -h        도움말"
     echo ""
-    echo "Commands:"
-    echo "  prep    <month> [source]    정제·kiwi·ko-sroberta 임베딩 (GPU 권장)"
-    echo "                                source: hf|local  (기본 hf)"
-    echo "  track   <month>             온라인 autoregressive 트래킹"
-    echo "  viz     <month>             스트리밍 타임라인 그림 (png)"
-    echo "  export  [month1,month2...]  일별 리플레이 HTML (기본: config 전체 월)"
-    echo "  upload  [--dry-run]         PII 가드 + HF private 데이터셋 업로드"
+    echo "── 데이터 준비 (로컬 덤프 사용 시, 선택) ──────────────────"
     echo "  extract [--with-comments]   로컬 덤프 → data/*.parquet 캐시"
-    echo "  all     <month> [source]    prep → track → viz → export 한번에"
+    echo "  upload  [--dry-run]         PII 가드 + HF private 데이터셋 업로드"
     echo ""
-    echo "Examples:"
-    echo "  ./event_online_run.sh -g 0 prep 2025-09 hf"
-    echo "  ./event_online_run.sh track 2025-09"
-    echo "  ./event_online_run.sh viz 2025-09"
-    echo "  ./event_online_run.sh export 2025-09,2025-10,2025-11"
-    echo "  ./event_online_run.sh upload --dry-run"
-    echo "  ./event_online_run.sh extract --with-comments"
-    echo "  ./event_online_run.sh -g 0 all 2025-09 hf"
+    echo "── 분석 파이프라인 (순서대로 실행) ────────────────────────"
+    echo "  prep    <YYYY-MM> [source]  1. 정제·임베딩 (GPU 권장)  source: hf|local"
+    echo "  track   <YYYY-MM>           2. 온라인 이벤트 트래킹"
+    echo "  viz     <YYYY-MM>           3. 타임라인 시각화 (png)"
+    echo "  export  [YYYY-MM,...]       4. 자립형 HTML 리플레이 (기본: 전체 월)"
+    echo ""
+    echo "── 한번에 ──────────────────────────────────────────────────"
+    echo "  all     <YYYY-MM> [source]  prep → track → viz → export"
     echo ""
     echo "환경변수:"
     echo "  MINDCAST_HF_REPO   HF 데이터셋 repo (기본: merrybabyxmas/mindcast-news-events)"
@@ -98,8 +107,9 @@ run_py() {
 # ── pipeline 함수 ─────────────────────────────────────────────
 
 do_prep() {
-    local month="${1:-2025-09}"
+    local month="${1:-}"
     local source="${2:-hf}"
+    [[ -z "$month" ]] && die "월을 지정하세요  (예: prep 2025-09 hf)"
     log "=== [prep] 정제·임베딩  month=$month  source=$source  gpu=${GPU:-auto} ==="
     # shellcheck disable=SC2046
     run_py "prep ($month, $source)" --run prep --month "$month" --source "$source" $(gpu_args)
@@ -107,17 +117,20 @@ do_prep() {
 }
 
 do_track() {
-    local month="${1:-2025-09}"
+    local month="${1:-}"
+    [[ -z "$month" ]] && die "월을 지정하세요  (예: track 2025-09)"
     log "=== [track] 온라인 트래킹  month=$month ==="
     run_py "track ($month)" --run track --month "$month"
     ok "=== track 완료 → outputs/tracks_online_${month}.pkl + events_online_${month}.csv ==="
 }
 
 do_viz() {
-    local month="${1:-2025-09}"
+    local month="${1:-}"
+    [[ -z "$month" ]] && die "월을 지정하세요  (예: viz 2025-09)"
     log "=== [viz] 스트리밍 타임라인  month=$month ==="
     run_py "viz ($month)" --run viz --month "$month"
-    ok "=== viz 완료 → figures/06_online_dynamics_${month}.png ==="
+    ok "=== viz 완료 → figures/online_dynamics_${month}.png ==="
+
 }
 
 do_export() {
@@ -146,6 +159,12 @@ do_upload() {
 
 do_extract() {
     local with_cmt="${1:-}"
+    if [[ -z "${MINDCAST_DUMP:-}" ]]; then
+        die "MINDCAST_DUMP 환경변수가 설정되지 않았습니다.\n\n  export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql\n  export MINDCAST_DUMP=/path/to/mindcast-prod-YYYYMMDD.sql.gz"
+    fi
+    if [[ ! -f "$MINDCAST_DUMP" ]]; then
+        die "덤프 파일을 찾을 수 없습니다: $MINDCAST_DUMP"
+    fi
     if [[ "$with_cmt" == "--with-comments" ]]; then
         log "=== [extract] 로컬 덤프 → parquet  (video_comment 포함) ==="
         run_py "extract (with-comments)" --run extract --with-comments
@@ -157,8 +176,9 @@ do_extract() {
 }
 
 do_all() {
-    local month="${1:-2025-09}"
+    local month="${1:-}"
     local source="${2:-hf}"
+    [[ -z "$month" ]] && die "월을 지정하세요  (예: all 2025-09 hf)"
     log "=== 전체 파이프라인  month=$month  source=$source  gpu=${GPU:-auto} ==="
     do_prep  "$month" "$source"
     do_track "$month"
@@ -174,13 +194,13 @@ CMD="${1:-}"
 shift || true
 
 case "$CMD" in
-    prep)    do_prep    "${1:-2025-09}" "${2:-hf}" ;;
-    track)   do_track   "${1:-2025-09}" ;;
-    viz)     do_viz     "${1:-2025-09}" ;;
+    prep)    do_prep    "${1:-}" "${2:-hf}" ;;
+    track)   do_track   "${1:-}" ;;
+    viz)     do_viz     "${1:-}" ;;
     export)  do_export  "${1:-}" ;;
     upload)  do_upload  "${1:-}" ;;
     extract) do_extract "${1:-}" ;;
-    all)     do_all     "${1:-2025-09}" "${2:-hf}" ;;
+    all)     do_all     "${1:-}" "${2:-hf}" ;;
     ""|--help|-h) usage ;;
     *) die "알 수 없는 명령: '$CMD'\n\n$(usage)" ;;
 esac
