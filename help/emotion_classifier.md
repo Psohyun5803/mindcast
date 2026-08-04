@@ -37,6 +37,22 @@ personalrepo/
 ```
 
 ```
+root/data/emotion_classifier/
+├── assets/                              # kote_id2label.json, mapping_ver1.json
+├── cache/                               # 학습 중간 산출물
+│   ├── teacher_targets.parquet          # teacher 단계 출력
+│   ├── teacher_targets_file_stats.csv
+│   ├── teacher_targets_id2label.json
+│   └── stagea_normalized.parquet        # prep-a 출력
+├── checkpoints/                         # 모델 가중치
+│   ├── offline_bundle.pt                # 배포용 번들 (Stage A+B 통합)
+│   ├── offline_bundle.pt.meta.json
+│   ├── stage_a/                         # Stage A student 체크포인트
+│   └── stage_b/                         # Stage B adapter 체크포인트
+└── outputs/                             # 추론 결과
+```
+
+```
 personalrepo/src/sarcasm_emotion_adapter/    # 핵심 패키지 (모델·데이터·추론)
 ├── modeling.py                              # StageAStudent, StageBSarcasmAdapter
 ├── dataio.py                                # load_dataset_frame, write_dataframe
